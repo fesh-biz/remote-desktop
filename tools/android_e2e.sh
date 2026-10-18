@@ -56,7 +56,11 @@ shot 05-keyboard
 adb shell input keyevent KEYCODE_BACK       # hide IME
 sleep 2
 
-step toolbar
+step toolbar in landscape
+adb shell settings put system accelerometer_rotation 0
+adb shell settings put system user_rotation 1
+sleep 4
+shot 10-landscape
 t $UI text "Esc"
 t $UI text "Ctrl"
 sleep 1
@@ -68,14 +72,18 @@ shot 07-extra-row
 t $UI text "F5"
 t $UI text "🖱 Тачпад"
 sleep 2
-adb shell input tap $CX $CY                 # direct mode tap
+adb shell input tap $CY $CX                 # direct mode tap (landscape)
 sleep 1
-adb shell input swipe $X1 $Y1 $X2 $Y2 500   # direct mode drag
+adb shell input swipe $Y1 $X1 $Y2 $X2 500   # direct mode drag
 sleep 1
-t $UI text "🖥 1/2"                  # stub has two monitors (scrolled? try landscape later)
+adb shell input swipe $((H*6/10)) $((W-45)) $((H/10)) $((W-45)) 300   # scroll toolbar
+sleep 1
+t $UI text "🖥 1/2"                  # stub has two monitors
 sleep 3
 shot 08-monitor2
 
+adb shell settings put system user_rotation 0
+sleep 3
 step settings
 t $UI text "⚙"
 sleep 2
@@ -83,13 +91,6 @@ shot 09-settings
 t $UI text "Зберегти"
 sleep 2
 
-step rotate
-adb shell settings put system accelerometer_rotation 0
-adb shell settings put system user_rotation 1
-sleep 4
-shot 10-landscape
-adb shell settings put system user_rotation 0
-sleep 3
 
 step disconnect
 adb shell input keyevent KEYCODE_BACK

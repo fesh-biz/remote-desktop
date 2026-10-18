@@ -568,7 +568,9 @@ final class RemoteView extends View {
         int vk = KeyMap.special(keyCode);
         if (vk == 0 && withMods) vk = KeyMap.letterOrDigit(keyCode);
         if (vk != 0) {
-            sink.keyEvent(vk, down);
+            // ordinary keys are sent as a complete press on key-down: the matching
+            // key-up is not always delivered (IME), and a stuck key on the PC is worse
+            if (down) sink.tapKey(vk);
             return true;
         }
         if (down) {
