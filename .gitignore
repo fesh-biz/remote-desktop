@@ -1,0 +1,11 @@
+dist/
+logs/
+server/rsrc_windows_amd64.syso
+server/winres/app.rc
+server/remote-desktop.json
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml

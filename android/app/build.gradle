@@ -1,0 +1,52 @@
+plugins {
+    id 'com.android.application'
+}
+
+def ciVersionCode = System.getenv("VERSION_CODE")
+def ciVersionName = System.getenv("VERSION_NAME")
+
+android {
+    namespace 'biz.fesh.remotedesktop'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'biz.fesh.remotedesktop'
+        minSdk 26
+        targetSdk 35
+        versionCode ciVersionCode ? ciVersionCode.toInteger() : 1
+        versionName ciVersionName ?: '1.0.0'
+    }
+
+    signingConfigs {
+        release {
+            // Override with your own key via env vars; the bundled one keeps
+            // updates installable over each other for personal builds.
+            storeFile System.getenv("RD_KEYSTORE") ? file(System.getenv("RD_KEYSTORE")) : file('signing/remote-desktop.jks')
+            storePassword System.getenv("RD_KEYSTORE_PASSWORD") ?: 'remotedesktop'
+            keyAlias System.getenv("RD_KEY_ALIAS") ?: 'remotedesktop'
+            keyPassword System.getenv("RD_KEY_PASSWORD") ?: 'remotedesktop'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
+        }
+        debug {
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}

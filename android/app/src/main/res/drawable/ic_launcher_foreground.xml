@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 108dp canvas, artwork kept inside the 66dp safe zone (21..87) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- monitor frame -->
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M30,34 h40 a4,4 0 0 1 4,4 v26 a4,4 0 0 1 -4,4 h-40 a4,4 0 0 1 -4,-4 v-26 a4,4 0 0 1 4,-4z M31,39 v24 h38 v-24z" />
+    <!-- stand -->
+    <path android:fillColor="#FFFFFFFF" android:pathData="M46,68 h8 v6 h-8z M40,73 h20 a2,2 0 0 1 0,4 h-20 a2,2 0 0 1 0,-4z" />
+    <!-- phone -->
+    <path android:fillColor="#FF7C3AED" android:pathData="M62,50 h16 a4,4 0 0 1 4,4 v26 a4,4 0 0 1 -4,4 h-16 a4,4 0 0 1 -4,-4 v-26 a4,4 0 0 1 4,-4z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M64,53 h12 a2.5,2.5 0 0 1 2.5,2.5 v22 a2.5,2.5 0 0 1 -2.5,2.5 h-12 a2.5,2.5 0 0 1 -2.5,-2.5 v-22 a2.5,2.5 0 0 1 2.5,-2.5z" />
+    <path android:fillColor="#FF2563EB" android:pathData="M65.5,56 h9 v17 h-9z" />
+    <path android:fillColor="#FF7C3AED" android:pathData="M70,75 m-1.6,0 a1.6,1.6 0 1 0 3.2,0 a1.6,1.6 0 1 0 -3.2,0" />
+</vector>
