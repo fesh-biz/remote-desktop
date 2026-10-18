@@ -34,9 +34,9 @@ def main():
     if cmd == "id":
         p = find(lambda n: n.get("resource-id", "").endswith(":id/" + arg))
     elif cmd == "text":
-        p = find(lambda n: n.get("text", "") == arg)
+        p = find(lambda n: n.get("text", "").casefold() == arg.casefold())
     elif cmd == "textcontains":
-        p = find(lambda n: arg in n.get("text", ""))
+        p = find(lambda n: arg.casefold() in n.get("text", "").casefold())
     else:
         raise SystemExit("unknown command")
     if p is None:
