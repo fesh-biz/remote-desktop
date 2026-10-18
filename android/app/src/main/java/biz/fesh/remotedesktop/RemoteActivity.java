@@ -131,8 +131,13 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
         extraScroll = wrapRow(extra);
         extraScroll.setVisibility(View.GONE);
         toolbarBox.addView(extraScroll);
+        LinearLayout mainLine = new LinearLayout(this);
+        mainLine.setOrientation(LinearLayout.HORIZONTAL);
+        toolbarBox.addView(mainLine);
         LinearLayout main = newRow();
-        toolbarBox.addView(wrapRow(main));
+        mainLine.addView(wrapRow(main), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout fixed = newRow();
+        mainLine.addView(fixed);
 
         // main row
         main.addView(button("⌨", v -> toggleKeyboard()));
@@ -152,12 +157,13 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
         main.addView(repeatButton("⌫", Protocol.VK_BACK));
         main.addView(repeatButton("Del", Protocol.VK_DELETE));
         main.addView(button("Enter", v -> tapKey(Protocol.VK_RETURN)));
-        main.addView(button("⋯", v -> extraScroll.setVisibility(extraScroll.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE)));
         btnMon = button("🖥 1", v -> nextMonitor());
         btnMon.setVisibility(View.GONE);
         main.addView(btnMon);
-        main.addView(button("⚙", v -> showSettings()));
-        main.addView(button("✕", v -> setToolbarVisible(false)));
+        // always visible on the right, even on a narrow portrait screen
+        fixed.addView(button("⋯", v -> extraScroll.setVisibility(extraScroll.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE)));
+        fixed.addView(button("⚙", v -> showSettings()));
+        fixed.addView(button("✕", v -> setToolbarVisible(false)));
 
         // extra row
         for (int f = 0; f < 12; f++) {

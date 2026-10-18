@@ -94,6 +94,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        editHost.clearFocus();
         rebuildFromRecent();
         search();
     }

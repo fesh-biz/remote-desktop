@@ -31,11 +31,16 @@ sleep 3
 shot 04-remote
 
 step gestures
-adb shell input swipe 400 400 700 500 400   # touchpad move
+read W H < <(adb shell wm size | grep -o '[0-9]*x[0-9]*' | tail -1 | tr x ' ')
+X1=$((W*3/10)); X2=$((W*7/10)); Y1=$((H*3/10)); Y2=$((H*4/10)); CX=$((W/2)); CY=$((H/3))
+note "screen ${W}x${H}"
+adb shell input swipe $X1 $Y1 $X2 $Y2 400   # touchpad move
 sleep 1
-adb shell input tap 600 400                 # left click (after double-tap window)
+adb shell input tap $CX $CY                 # left click (after double-tap window)
 sleep 1
-adb shell input swipe 500 300 500 300 900   # long press → right click
+adb shell input tap $CX $CY; adb shell input tap $CX $CY   # double click
+sleep 1
+adb shell input swipe $CX $CY $CX $CY 900   # long press -> right click
 sleep 1
 
 step keyboard
@@ -61,9 +66,11 @@ shot 07-extra-row
 t $UI text "F5"
 t $UI text "🖱 Тачпад"
 sleep 2
-adb shell input tap 500 350                 # direct mode tap
+adb shell input tap $CX $CY                 # direct mode tap
 sleep 1
-t $UI text "🖥 1/2"                  # stub has two monitors
+adb shell input swipe $X1 $Y1 $X2 $Y2 500   # direct mode drag
+sleep 1
+t $UI text "🖥 1/2"                  # stub has two monitors (scrolled? try landscape later)
 sleep 3
 shot 08-monitor2
 
