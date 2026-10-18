@@ -319,6 +319,7 @@ func (ss *Session) streamLoop() {
 	if err != nil {
 		logf("Помилка захоплення екрана: %v", err)
 		ss.sendJSON(map[string]any{"t": "error", "msg": "Не вдалося захопити екран: " + err.Error()})
+		ss.conn.Close()
 		return
 	}
 	defer capt.close()

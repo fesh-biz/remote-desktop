@@ -10,11 +10,14 @@ import struct
 import subprocess
 import sys
 import time
+import traceback
 
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 EXE, OUT = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
 os.makedirs(OUT, exist_ok=True)
 PORT, PIN = 47900, "246810"
 results = []
+sys.excepthook = lambda *a: (open(os.path.join(OUT, "traceback.txt"), "w").write("".join(traceback.format_exception(*a))), traceback.print_exception(*a))
 
 
 def check(name, ok, detail=""):

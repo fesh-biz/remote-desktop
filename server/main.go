@@ -118,7 +118,7 @@ func printBanner(name string, cfg Config, cfgPath string, fw firewallState) {
 	fmt.Println("  3. Введіть PIN-код. Закрийте це вікно, щоб зупинити сервер.")
 	switch fw {
 	case firewallAdded:
-		fmt.Println("  Брандмауер: правило для входящих підключень додано.")
+		fmt.Println("  Брандмауер: правило для вхідних підключень додано.")
 	case firewallNotElevated:
 		fmt.Println("  Якщо телефон не бачить ПК — дозвольте доступ у вікні брандмауера")
 		fmt.Println("  або запустіть програму один раз «від імені адміністратора».")
