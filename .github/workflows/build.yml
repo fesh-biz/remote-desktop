@@ -144,5 +144,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p test-android && cp stub.log test-android/ || true
-          gh release delete ci-android --yes --cleanup-tag || true
-          gh release create ci-android test-android/* --prerelease --target "$GITHUB_SHA" --title "CI test (Android)" --notes "Run ${{ github.run_id }}"
+          tail -c 3000 stub.log | sed ':a;N;$!ba;s/\n/%0A/g' | sed 's/^/::warning title=stub-log::/'
+          ls -la test-android
+          gh release delete ci-android --yes --cleanup-tag 2>err.txt || true
+          if ! gh release create ci-android test-android/* --prerelease --target "$GITHUB_SHA" --title "CI test (Android)" --notes "Run ${{ github.run_id }}" 2>>err.txt; then
+            echo "::error title=publish::$(tr '\n' ' ' < err.txt)"
+            exit 1
+          fi

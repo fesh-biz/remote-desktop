@@ -7,24 +7,26 @@ UI="python3 tools/adb_ui.py"
 shot() { adb exec-out screencap -p > "$OUT/$1.png"; }
 fail=0
 step() { echo "== $*"; }
+note() { local m="${*//'%'/'%25'}"; m="${m//$'\n'/'%0A'}"; echo "::warning title=android-e2e::$m"; }
+t() { "$@" || { fail=1; note "failed: $*"; }; }
 
 adb logcat -c
 step install
-adb install -r dist/RemoteDesktop.apk || fail=1
+t adb install -r dist/RemoteDesktop.apk
 adb shell am start -n biz.fesh.remotedesktop/.MainActivity
 sleep 8
 shot 01-main
 
 step manual connect
 $UI id editHost && adb shell input text 10.0.2.2 && sleep 1
-$UI id btnConnect || fail=1
+t $UI id btnConnect
 sleep 3
 shot 02-pin-dialog
 adb shell input text 123456
 adb shell input keyevent KEYCODE_ENTER
 sleep 6
 shot 03-connected-help
-$UI text "Зрозуміло" || fail=1
+t $UI text "Зрозуміло"
 sleep 3
 shot 04-remote
 
@@ -37,7 +39,7 @@ adb shell input swipe 500 300 500 300 900   # long press → right click
 sleep 1
 
 step keyboard
-$UI text "⌨" || fail=1
+t $UI text "⌨"
 sleep 3
 adb shell input text hello
 adb shell input keyevent KEYCODE_DEL
@@ -48,28 +50,28 @@ adb shell input keyevent KEYCODE_BACK       # hide IME
 sleep 2
 
 step toolbar
-$UI text "Esc" || fail=1
-$UI text "Ctrl" || fail=1
+t $UI text "Esc"
+t $UI text "Ctrl"
 sleep 1
 shot 06-ctrl-sticky
-$UI text "Tab" || fail=1
-$UI text "⋯" || fail=1
+t $UI text "Tab"
+t $UI text "⋯"
 sleep 2
 shot 07-extra-row
-$UI text "F5" || fail=1
-$UI text "🖱 Тачпад" || fail=1
+t $UI text "F5"
+t $UI text "🖱 Тачпад"
 sleep 2
 adb shell input tap 500 350                 # direct mode tap
 sleep 1
-$UI text "🖥 1/2" || fail=1                  # stub has two monitors
+t $UI text "🖥 1/2"                  # stub has two monitors
 sleep 3
 shot 08-monitor2
 
 step settings
-$UI text "⚙" || fail=1
+t $UI text "⚙"
 sleep 2
 shot 09-settings
-$UI text "Зберегти" || fail=1
+t $UI text "Зберегти"
 sleep 2
 
 step rotate
@@ -84,11 +86,12 @@ step disconnect
 adb shell input keyevent KEYCODE_BACK
 sleep 2
 shot 11-back-dialog
-$UI text "Відключитися" || fail=1
+t $UI text "Відключитися"
 sleep 4
 shot 12-main-after
 
 adb logcat -d > "$OUT/logcat.txt"
-grep -A 30 "FATAL EXCEPTION" "$OUT/logcat.txt" > "$OUT/crash.txt" && fail=1
+if grep -A 30 "FATAL EXCEPTION" "$OUT/logcat.txt" > "$OUT/crash.txt"; then fail=1; note "CRASH: $(head -c 3000 "$OUT/crash.txt")"; fi
+note "files: $(ls "$OUT" | tr '\n' ' ')"
 echo "fail=$fail"
 exit $fail
