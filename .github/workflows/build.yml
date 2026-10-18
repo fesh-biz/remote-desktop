@@ -28,13 +28,12 @@ jobs:
           go build -o ../RemoteDesktop-test.exe .
           cd ..
           python tools/e2e_test.py RemoteDesktop-test.exe test-out
-      - name: Publish test results
+      - name: Upload test results
         if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete ci-test --yes --cleanup-tag || true
-          gh release create ci-test test-out/* --prerelease --target "$GITHUB_SHA" --title "CI test (Windows)" --notes "Run ${{ github.run_id }}"
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-windows
+          path: test-out
 
   build:
     runs-on: ubuntu-latest
@@ -87,6 +86,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          for t in ci-logs ci-test ci-android; do gh release delete $t --yes --cleanup-tag || true; done
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest dist/* --prerelease --target "$GITHUB_SHA" \
             --title "Остання збірка ($VERSION_NAME)" \
@@ -101,11 +101,10 @@ jobs:
 
       - name: Upload logs on failure
         if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release delete ci-logs --yes --cleanup-tag || true
-          gh release create ci-logs logs/* --prerelease --target "$GITHUB_SHA" --title "CI logs" --notes "Failed run ${{ github.run_id }}"
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: logs
 
   test-android:
     needs: build
@@ -139,17 +138,11 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: bash tools/android_e2e.sh
-      - name: Publish test results
+      - name: Upload test results
         if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p test-android && cp stub.log test-android/ || true
-          tail -c 3000 stub.log | sed ':a;N;$!ba;s/\n/%0A/g' | sed 's/^/::warning title=stub-log::/'
-          find test-android -type f -empty -delete
-          ls -la test-android
-          gh release delete ci-android --yes --cleanup-tag 2>err.txt || true
-          if ! gh release create ci-android test-android/* --prerelease --target "$GITHUB_SHA" --title "CI test (Android)" --notes "Run ${{ github.run_id }}" 2>>err.txt; then
-            echo "::error title=publish::$(tr '\n' ' ' < err.txt)"
-            exit 1
-          fi
+        run: mkdir -p test-android && cp stub.log test-android/ || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-android
+          path: test-android
