@@ -252,19 +252,26 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
     @SuppressLint("ClickableViewAccessibility")
     private TextView repeatButton(String label, int vk) {
         TextView b = button(label, null);
+        final boolean[] repeating = new boolean[1];
         final Runnable[] repeat = new Runnable[1];
         repeat[0] = () -> {
+            repeating[0] = true;
             tapKey(vk);
             ui.postDelayed(repeat[0], 55);
         };
+        // tap on release, auto-repeat while held; a toolbar scroll (CANCEL) sends nothing
         b.setOnTouchListener((v, e) -> {
             switch (e.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     v.setPressed(true);
-                    tapKey(vk);
-                    ui.postDelayed(repeat[0], 420);
+                    repeating[0] = false;
+                    ui.postDelayed(repeat[0], 380);
                     return true;
                 case MotionEvent.ACTION_UP:
+                    v.setPressed(false);
+                    ui.removeCallbacks(repeat[0]);
+                    if (!repeating[0]) tapKey(vk);
+                    return true;
                 case MotionEvent.ACTION_CANCEL:
                     v.setPressed(false);
                     ui.removeCallbacks(repeat[0]);
