@@ -11,6 +11,7 @@ note() { local m="${*//'%'/'%25'}"; m="${m//$'\n'/'%0A'}"; echo "::warning title
 t() { "$@" || { fail=1; note "failed: $*"; }; }
 
 adb logcat -c
+adb shell settings put secure immersive_mode_confirmations confirmed
 step install
 t adb install -r dist/RemoteDesktop.apk
 adb shell am start -n biz.fesh.remotedesktop/.MainActivity
