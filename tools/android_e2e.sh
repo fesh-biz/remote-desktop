@@ -46,6 +46,18 @@ sleep 1
 adb shell input swipe $CX $CY $CX $CY 900   # long press -> right click
 sleep 1
 
+step zoom follows the pointer
+t $UI text "⋯"
+sleep 1
+t $UI text "🔍"                     # 2x, pointer centred
+sleep 2
+adb shell input swipe $X1 $CY $X2 $CY 600   # pointer moves, view follows
+sleep 2
+shot 04b-zoom2x
+t $UI text "1:1"
+t $UI text "⋯"
+sleep 1
+
 step keyboard
 t $UI text "⌨"
 sleep 3

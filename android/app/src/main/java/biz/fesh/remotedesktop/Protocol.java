@@ -10,11 +10,14 @@ final class Protocol {
     static final int DEFAULT_PORT = 47800;
     static final int DISCOVERY_PORT = 47801;
     static final String DISCOVERY_QUERY = "RDESK?";
-    static final int VERSION = 1;
+    /** 2: the mouse pointer comes separately ('C', 'S') instead of being drawn into frames. */
+    static final int VERSION = 2;
 
     static final byte MSG_JSON = 'J';
     static final byte MSG_FRAME = 'F';
     static final byte MSG_ACK = 'A';
+    static final byte MSG_CURSOR = 'C';
+    static final byte MSG_SHAPE = 'S';
 
     // Windows virtual-key codes
     static final int VK_BACK = 0x08, VK_TAB = 0x09, VK_RETURN = 0x0D, VK_SHIFT = 0x10, VK_CONTROL = 0x11,
@@ -53,9 +56,16 @@ final class Protocol {
         return o;
     }
 
+    static int readInt(byte[] b, int off) {
+        return ((b[off] & 0xFF) << 24) | ((b[off + 1] & 0xFF) << 16) | ((b[off + 2] & 0xFF) << 8) | (b[off + 3] & 0xFF);
+    }
+
+    static int readUShort(byte[] b, int off) {
+        return ((b[off] & 0xFF) << 8) | (b[off + 1] & 0xFF);
+    }
+
     static float readFloat(byte[] b, int off) {
-        int bits = ((b[off] & 0xFF) << 24) | ((b[off + 1] & 0xFF) << 16) | ((b[off + 2] & 0xFF) << 8) | (b[off + 3] & 0xFF);
-        return Float.intBitsToFloat(bits);
+        return Float.intBitsToFloat(readInt(b, off));
     }
 
     static boolean isModifier(int vk) {

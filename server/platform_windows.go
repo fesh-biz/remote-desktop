@@ -12,6 +12,7 @@ import (
 	"sort"
 	"sync"
 	"syscall"
+	"time"
 	"unicode/utf16"
 	"unsafe"
 )
@@ -48,6 +49,7 @@ var (
 	pSetStretchBltMode  = gdi32.NewProc("SetStretchBltMode")
 	pSetBrushOrgEx      = gdi32.NewProc("SetBrushOrgEx")
 	pGdiFlush           = gdi32.NewProc("GdiFlush")
+	pGetObjectW         = gdi32.NewProc("GetObjectW")
 
 	pGetConsoleMode          = kernel32.NewProc("GetConsoleMode")
 	pSetConsoleMode          = kernel32.NewProc("SetConsoleMode")
@@ -342,7 +344,7 @@ func (c *winCapturer) hotspot(cur uintptr) point {
 	return p
 }
 
-func (c *winCapturer) capture(m Monitor, dw, dh int) (bool, float32, float32, error) {
+func (c *winCapturer) capture(m Monitor, dw, dh int, drawCursor bool) (bool, float32, float32, error) {
 	if err := c.ensure(dw, dh); err != nil {
 		return false, -1, -1, err
 	}
@@ -366,6 +368,8 @@ func (c *winCapturer) capture(m Monitor, dw, dh int) (bool, float32, float32, er
 		px, py := int(ci.Pos.X)-m.X, int(ci.Pos.Y)-m.Y
 		if px >= 0 && py >= 0 && px < m.W && py < m.H {
 			cx, cy = float32(px)/float32(m.W), float32(py)/float32(m.H)
+		}
+		if drawCursor && cx >= 0 {
 			scale := float64(dw) / float64(m.W)
 			size := int(float64(getMetric(smCxCursor)) * scale)
 			if size < 16 {
@@ -411,6 +415,17 @@ func virtualScreen() (x, y, w, h int) {
 	return getMetric(smXVirtualScreen), getMetric(smYVirtualScreen), getMetric(smCxVirtualScreen), getMetric(smCyVirtualScreen)
 }
 
+// Where the last injected move put the pointer. SendInput is asynchronous,
+// so GetCursorPos can still return the old position right after it; quick
+// successive moves are therefore based on this instead.
+var (
+	injMu      sync.Mutex
+	injX, injY int
+	injAt      time.Time
+)
+
+const injFresh = 120 * time.Millisecond
+
 func mouseMoveAbs(x, y int) {
 	vx, vy, vw, vh := virtualScreen()
 	if vw <= 1 || vh <= 1 {
@@ -430,13 +445,115 @@ func mouseMoveAbs(x, y int) {
 	}
 	nx := int32(((x-vx)*65535 + (vw-1)/2) / (vw - 1))
 	ny := int32(((y-vy)*65535 + (vh-1)/2) / (vh - 1))
+	injMu.Lock()
+	injX, injY, injAt = x, y, time.Now()
+	injMu.Unlock()
 	sendMouse(nx, ny, 0, mouseeventfMove|mouseeventfAbsolute|mouseeventfVirtualDsk)
 }
 
 func mouseMoveRel(dx, dy int) {
-	var p point
-	pGetCursorPos.Call(uintptr(unsafe.Pointer(&p)))
-	mouseMoveAbs(int(p.X)+dx, int(p.Y)+dy)
+	injMu.Lock()
+	bx, by, fresh := injX, injY, time.Since(injAt) < injFresh
+	injMu.Unlock()
+	if !fresh {
+		var p point
+		pGetCursorPos.Call(uintptr(unsafe.Pointer(&p)))
+		bx, by = int(p.X), int(p.Y)
+	}
+	mouseMoveAbs(bx+dx, by+dy)
+}
+
+func readCursor() cursorPos {
+	var ci cursorInfo
+	ci.Size = uint32(unsafe.Sizeof(ci))
+	var c cursorPos
+	if ok, _, _ := pGetCursorInfo.Call(uintptr(unsafe.Pointer(&ci))); ok != 0 {
+		c = cursorPos{X: int(ci.Pos.X), Y: int(ci.Pos.Y), Visible: ci.Flags&cursorShown != 0 && ci.Cursor != 0, Shape: ci.Cursor}
+	} else {
+		var p point
+		pGetCursorPos.Call(uintptr(unsafe.Pointer(&p)))
+		c = cursorPos{X: int(p.X), Y: int(p.Y)}
+	}
+	injMu.Lock()
+	if time.Since(injAt) < injFresh {
+		c.X, c.Y = injX, injY
+	}
+	injMu.Unlock()
+	return c
+}
+
+type bitmapObj struct {
+	Type       int32
+	Width      int32
+	Height     int32
+	WidthBytes int32
+	Planes     uint16
+	BitsPixel  uint16
+	Bits       uintptr
+}
+
+// cursorImage renders a pointer (cursor handle) with its transparency by
+// drawing it on black and on white.
+func cursorImage(h uintptr) (*image.NRGBA, int, int, error) {
+	var ii iconInfo
+	if r, _, _ := pGetIconInfo.Call(h, uintptr(unsafe.Pointer(&ii))); r == 0 {
+		return nil, 0, 0, errors.New("GetIconInfo failed")
+	}
+	w, hh := 32, 32
+	var bm bitmapObj
+	if ii.Color != 0 {
+		if r, _, _ := pGetObjectW.Call(ii.Color, unsafe.Sizeof(bm), uintptr(unsafe.Pointer(&bm))); r != 0 {
+			w, hh = int(bm.Width), int(bm.Height)
+		}
+	} else if ii.Mask != 0 {
+		if r, _, _ := pGetObjectW.Call(ii.Mask, unsafe.Sizeof(bm), uintptr(unsafe.Pointer(&bm))); r != 0 {
+			w, hh = int(bm.Width), int(bm.Height)/2
+		}
+	}
+	if ii.Mask != 0 {
+		pDeleteObject.Call(ii.Mask)
+	}
+	if ii.Color != 0 {
+		pDeleteObject.Call(ii.Color)
+	}
+	if w <= 0 || hh <= 0 || w > 256 || hh > 256 {
+		w, hh = 32, 32
+	}
+
+	screen, _, _ := pGetDC.Call(0)
+	dc, _, _ := pCreateCompatibleDC.Call(screen)
+	pReleaseDC.Call(0, screen)
+	if dc == 0 {
+		return nil, 0, 0, errors.New("CreateCompatibleDC failed")
+	}
+	defer pDeleteDC.Call(dc)
+	bi := bitmapInfo{Header: bitmapInfoHeader{
+		Size: uint32(unsafe.Sizeof(bitmapInfoHeader{})), Width: int32(w), Height: -int32(hh),
+		Planes: 1, BitCount: 32,
+	}}
+	var bits unsafe.Pointer
+	bmp, _, _ := pCreateDIBSection.Call(dc, uintptr(unsafe.Pointer(&bi)), 0, uintptr(unsafe.Pointer(&bits)), 0, 0)
+	if bmp == 0 || bits == nil {
+		return nil, 0, 0, errors.New("CreateDIBSection failed")
+	}
+	defer pDeleteObject.Call(bmp)
+	old, _, _ := pSelectObject.Call(dc, bmp)
+	defer pSelectObject.Call(dc, old)
+
+	px := unsafe.Slice((*byte)(bits), w*hh*4)
+	render := func(bg byte) []byte {
+		for i := range px {
+			px[i] = bg
+		}
+		pDrawIconEx.Call(dc, 0, 0, h, uintptr(w), uintptr(hh), 0, 0, diNormal)
+		pGdiFlush.Call()
+		out := make([]byte, len(px))
+		copy(out, px)
+		return out
+	}
+	black := render(0)
+	white := render(255)
+	return shapeFromBlackWhite(black, white, w, hh), int(ii.XHotspot), int(ii.YHotspot), nil
 }
 
 func mouseButton(b int, down bool) {

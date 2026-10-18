@@ -18,3 +18,14 @@ var (
 	_ [unsafe.Sizeof(monitorInfoEx{}) - 104]byte
 	_ [40 - unsafe.Sizeof(bitmapInfoHeader{})]byte
 )
+
+var (
+	_ [32 - unsafe.Sizeof(bitmapObj{})]byte
+	_ [unsafe.Sizeof(bitmapObj{}) - 32]byte
+	_ [80 - unsafe.Sizeof(wndClassEx{})]byte
+	_ [unsafe.Sizeof(wndClassEx{}) - 80]byte
+	_ [48 - unsafe.Sizeof(winMsg{})]byte
+	_ [unsafe.Sizeof(winMsg{}) - 48]byte
+	_ [976 - unsafe.Sizeof(notifyIconData{})]byte
+	_ [unsafe.Sizeof(notifyIconData{}) - 976]byte
+)

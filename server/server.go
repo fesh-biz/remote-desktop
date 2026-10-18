@@ -6,13 +6,12 @@ import (
 	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"image/jpeg"
-	"io"
 	"math"
 	"net"
 	"runtime"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,23 +22,40 @@ import (
 //	'J' — JSON control message
 //	'F' — frame (server→client): float32 cursorX, float32 cursorY (0..1, -1 = hidden), JPEG
 //	'A' — frame acknowledgement (client→server), empty payload
+//
+// Protocol version 2 (client says "ver":2 in hello) moves the mouse pointer out
+// of the picture so it can be shown at the display rate:
+//
+//	'C' — cursor (server→client), up to ~60 per second: int32 x, int32 y (physical
+//	      pixels relative to the streamed monitor), int32 monitorW, int32 monitorH,
+//	      uint32 seq (last "mm"/"mr" message applied, from its "i" field), uint8 flags (1 = visible)
+//	'S' — cursor shape (server→client): uint16 hotspotX, uint16 hotspotY, PNG
+//
+// The browser client uses the same messages over WebSocket ("/ws"): one binary
+// WebSocket message per protocol message, the type byte followed by the payload.
 const (
-	msgJSON  = 'J'
-	msgFrame = 'F'
-	msgAck   = 'A'
+	msgJSON   = 'J'
+	msgFrame  = 'F'
+	msgAck    = 'A'
+	msgCursor = 'C'
+	msgShape  = 'S'
 
 	maxMsgSize      = 4 << 20
-	protocolVersion = 1
+	protocolVersion = 2
 	maxInFlight     = 2
 )
 
 type Server struct {
-	cfg  Config
 	name string
+	port int
 
 	mu       sync.Mutex
+	pinCode  string
 	sessions map[*Session]struct{}
 	fails    map[string]*failInfo
+
+	// onEvent is called when a client connects or disconnects (tray notifications).
+	onEvent func(connected bool, client, ip string)
 }
 
 type failInfo struct {
@@ -48,7 +64,60 @@ type failInfo struct {
 }
 
 func newServer(cfg Config, name string) *Server {
-	return &Server{cfg: cfg, name: name, sessions: map[*Session]struct{}{}, fails: map[string]*failInfo{}}
+	return &Server{name: name, port: cfg.Port, pinCode: cfg.PIN, sessions: map[*Session]struct{}{}, fails: map[string]*failInfo{}}
+}
+
+func (s *Server) setOnEvent(f func(connected bool, client, ip string)) {
+	s.mu.Lock()
+	s.onEvent = f
+	s.mu.Unlock()
+}
+
+func (s *Server) event(connected bool, client, ip string) {
+	s.mu.Lock()
+	f := s.onEvent
+	s.mu.Unlock()
+	if f != nil {
+		f(connected, client, ip)
+	}
+}
+
+func (s *Server) pin() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pinCode
+}
+
+func (s *Server) setPIN(p string) {
+	s.mu.Lock()
+	s.pinCode = p
+	s.mu.Unlock()
+}
+
+// clients lists the connected devices for the tray menu.
+func (s *Server) clients() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.sessions))
+	for ss := range s.sessions {
+		out = append(out, ss.client+" ("+ss.ip+")")
+	}
+	sort.Strings(out)
+	return out
+}
+
+// shutdown releases keys and buttons held by clients before the process exits.
+func (s *Server) shutdown() {
+	s.mu.Lock()
+	list := make([]*Session, 0, len(s.sessions))
+	for ss := range s.sessions {
+		list = append(list, ss)
+	}
+	s.mu.Unlock()
+	for _, ss := range list {
+		ss.close()
+		ss.conn.Close()
+	}
 }
 
 func (s *Server) serve(ln net.Listener) {
@@ -121,10 +190,27 @@ func (s *Server) handle(c net.Conn) {
 	}
 	ip, _, _ := net.SplitHostPort(c.RemoteAddr().String())
 
+	br := bufio.NewReaderSize(c, 64<<10)
+	c.SetReadDeadline(time.Now().Add(15 * time.Second))
+	first, err := br.Peek(1)
+	if err != nil {
+		return
+	}
+	var tr transport
+	if first[0] == msgJSON {
+		tr = newTCPTransport(c, br) // Android app
+	} else {
+		tr = serveHTTP(c, br) // browser: web page or WebSocket
+		if tr == nil {
+			return
+		}
+	}
+
 	ss := &Session{
 		srv:     s,
 		conn:    c,
-		bw:      bufio.NewWriterSize(c, 256<<10),
+		tr:      tr,
+		ip:      ip,
 		credits: make(chan struct{}, maxInFlight+1),
 		wake:    make(chan struct{}, 1),
 		done:    make(chan struct{}),
@@ -137,9 +223,8 @@ func (s *Server) handle(c net.Conn) {
 		return
 	}
 
-	br := bufio.NewReaderSize(c, 64<<10)
 	c.SetReadDeadline(time.Now().Add(15 * time.Second))
-	typ, data, err := readMsg(br)
+	typ, data, err := tr.readMsg()
 	if err != nil || typ != msgJSON {
 		return
 	}
@@ -147,7 +232,7 @@ func (s *Server) handle(c net.Conn) {
 	if json.Unmarshal(data, &hello) != nil || hello.T != "hello" {
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(hello.PIN), []byte(s.cfg.PIN)) != 1 {
+	if subtle.ConstantTimeCompare([]byte(hello.PIN), []byte(s.pin())) != 1 {
 		s.registerFail(ip)
 		logf("Невірний PIN від %s", ip)
 		time.Sleep(700 * time.Millisecond)
@@ -156,33 +241,40 @@ func (s *Server) handle(c net.Conn) {
 	}
 	s.clearFail(ip)
 
-	client := hello.Client
-	if client == "" {
-		client = "телефон"
+	ss.client = hello.Client
+	if ss.client == "" {
+		ss.client = "телефон"
 	}
+	ss.v2 = hello.Ver >= 2
+	mons := listMonitors()
 	if err := ss.sendJSON(map[string]any{
 		"t": "auth", "ok": true, "host": s.name, "ver": protocolVersion, "server": version,
-		"mons": monitorsJSON(listMonitors()), "mon": 0,
+		"mons": monitorsJSON(mons), "vs": virtualScreenJSON(), "mon": 0,
 	}); err != nil {
 		return
 	}
 
 	n := s.add(ss)
-	logf("Підключено: %s (%s). Активних підключень: %d", client, ip, n)
+	logf("Підключено: %s (%s). Активних підключень: %d", ss.client, ip, n)
+	s.event(true, ss.client, ip)
 	defer func() {
 		s.remove(ss)
-		logf("Відключено: %s (%s)", client, ip)
+		logf("Відключено: %s (%s)", ss.client, ip)
+		s.event(false, ss.client, ip)
 	}()
 
 	for i := 0; i < maxInFlight; i++ {
 		ss.credits <- struct{}{}
 	}
 	go ss.streamLoop()
+	if ss.v2 {
+		go ss.cursorLoop()
+	}
 	defer ss.close()
 
 	for {
 		c.SetReadDeadline(time.Now().Add(20 * time.Second))
-		typ, data, err := readMsg(br)
+		typ, data, err := tr.readMsg()
 		if err != nil {
 			return
 		}
@@ -198,22 +290,6 @@ func (s *Server) handle(c net.Conn) {
 	}
 }
 
-func readMsg(r *bufio.Reader) (byte, []byte, error) {
-	var hdr [5]byte
-	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return 0, nil, err
-	}
-	n := binary.BigEndian.Uint32(hdr[1:])
-	if n > maxMsgSize {
-		return 0, nil, errors.New("message too large")
-	}
-	buf := make([]byte, n)
-	if _, err := io.ReadFull(r, buf); err != nil {
-		return 0, nil, err
-	}
-	return hdr[0], buf, nil
-}
-
 type streamSettings struct {
 	quality int
 	maxW    int
@@ -222,11 +298,13 @@ type streamSettings struct {
 }
 
 type Session struct {
-	srv  *Server
-	conn net.Conn
-
-	wmu sync.Mutex
-	bw  *bufio.Writer
+	srv     *Server
+	conn    net.Conn
+	tr      transport
+	ip      string
+	client  string
+	v2      bool // pointer sent separately ('C'/'S'), not drawn into frames
+	moveSeq atomic.Uint32
 
 	smu sync.Mutex
 	st  streamSettings
@@ -248,25 +326,7 @@ func (ss *Session) close() {
 }
 
 func (ss *Session) write(typ byte, parts ...[]byte) error {
-	ss.wmu.Lock()
-	defer ss.wmu.Unlock()
-	total := 0
-	for _, p := range parts {
-		total += len(p)
-	}
-	var hdr [5]byte
-	hdr[0] = typ
-	binary.BigEndian.PutUint32(hdr[1:], uint32(total))
-	ss.conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
-	if _, err := ss.bw.Write(hdr[:]); err != nil {
-		return err
-	}
-	for _, p := range parts {
-		if _, err := ss.bw.Write(p); err != nil {
-			return err
-		}
-	}
-	return ss.bw.Flush()
+	return ss.tr.writeMsg(typ, parts...)
 }
 
 func (ss *Session) sendJSON(v any) error {
@@ -293,9 +353,14 @@ func (ss *Session) poke() {
 func monitorsJSON(mons []Monitor) []map[string]any {
 	out := make([]map[string]any, 0, len(mons))
 	for _, m := range mons {
-		out = append(out, map[string]any{"w": m.W, "h": m.H, "p": m.Primary})
+		out = append(out, map[string]any{"x": m.X, "y": m.Y, "w": m.W, "h": m.H, "p": m.Primary})
 	}
 	return out
+}
+
+func virtualScreenJSON() []int {
+	x, y, w, h := virtualScreen()
+	return []int{x, y, w, h}
 }
 
 func pickMonitor(mons []Monitor, idx int) Monitor {
@@ -383,7 +448,7 @@ func (ss *Session) streamLoop() {
 				lastMonList = time.Now()
 				sig := fmt.Sprint(monitorsJSON(mons))
 				if lastMonSig != "" && sig != lastMonSig {
-					ss.sendJSON(map[string]any{"t": "mons", "mons": monitorsJSON(mons), "mon": st.mon})
+					ss.sendJSON(map[string]any{"t": "mons", "mons": monitorsJSON(mons), "vs": virtualScreenJSON(), "mon": st.mon})
 					ss.force.Store(true)
 				}
 				lastMonSig = sig
@@ -399,7 +464,7 @@ func (ss *Session) streamLoop() {
 			}
 
 			lastCapture = time.Now()
-			changed, cx, cy, err := capt.capture(m, dw, dh)
+			changed, cx, cy, err := capt.capture(m, dw, dh, !ss.v2)
 			if err != nil {
 				failCount++
 				if failCount == 1 || failCount%50 == 0 {
@@ -453,6 +518,7 @@ type ctrlMsg struct {
 	MaxW *int    `json:"maxw"`
 	FPS  int     `json:"fps"`
 	Mon  *int    `json:"mon"`
+	I    uint32  `json:"i"` // sequence number of "mm"/"mr", echoed in 'C' messages
 }
 
 func (ss *Session) handleJSON(data []byte) {
@@ -487,8 +553,14 @@ func (ss *Session) handleJSON(data []byte) {
 		x := mon.X + int(math.Round(clamp01(m.X)*float64(mon.W-1)))
 		y := mon.Y + int(math.Round(clamp01(m.Y)*float64(mon.H-1)))
 		mouseMoveAbs(x, y)
+		if m.I != 0 {
+			ss.moveSeq.Store(m.I)
+		}
 	case "mr":
 		mouseMoveRel(m.DX, m.DY)
+		if m.I != 0 {
+			ss.moveSeq.Store(m.I)
+		}
 	case "mb":
 		ss.input.button(m.B, m.D)
 	case "click":

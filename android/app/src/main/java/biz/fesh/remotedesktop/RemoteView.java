@@ -5,6 +5,7 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.RectF;
 import android.os.SystemClock;
 import android.text.InputType;
@@ -19,6 +20,8 @@ import android.view.inputmethod.InputConnection;
 
 import org.json.JSONObject;
 
+import java.util.ArrayDeque;
+
 /**
  * Shows the remote screen and turns touches into mouse input.
  *
@@ -26,6 +29,11 @@ import org.json.JSONObject;
  * double tap and drag = drag with left button, long press / two-finger tap = right click,
  * two-finger drag = scroll, pinch = zoom.
  * Direct mode: the pointer goes where you touch; drag = drag with left button.
+ *
+ * With a protocol-2 server the pointer is not part of the picture: it is drawn here at
+ * the display rate. Moves are applied locally at once and reconciled with the
+ * server's reports (which say up to which move they include). When zoomed in, the view
+ * keeps the pointer in the centre until it reaches an edge of the PC screen.
  */
 final class RemoteView extends View {
 
@@ -49,10 +57,25 @@ final class RemoteView extends View {
     private Connection conn;
 
     private Bitmap frame;
-    private float cursorX = -1, cursorY = -1;
+    private float cursorX = -1, cursorY = -1; // pointer drawn into the frame (protocol 1), 0..1
     private int pendingAcks;
     private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
     private final RectF dst = new RectF();
+
+    // pointer drawn by the app (protocol 2), in physical pixels of the streamed monitor
+    private boolean cursorChannel;
+    private boolean haveCursor, curVisible;
+    private int srvX, srvY, monW = 1, monH = 1;
+    private int boundL, boundT, boundR = -1, boundB = -1; // where the pointer can go (all monitors)
+    private float predX, predY;
+    private int moveSeq;
+    // {seq, 0, dx, dy} relative move in PC pixels, or {seq, 1, x, y} absolute in 1/65536 of the monitor
+    private final ArrayDeque<int[]> pendingMoves = new ArrayDeque<>();
+    private Bitmap shape;
+    private int hotX, hotY;
+    private final Path arrow = new Path();
+    private final Paint arrowFill = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint arrowStroke = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     private boolean touchpad = true;
     private float sensitivity = 1f;
@@ -97,13 +120,131 @@ final class RemoteView extends View {
         setFocusable(true);
         setFocusableInTouchMode(true);
         setBackgroundColor(Color.BLACK);
+        // fallback pointer until the PC sends its real image (32 px design units)
+        arrow.moveTo(0, 0);
+        arrow.lineTo(0, 22);
+        arrow.lineTo(6, 17);
+        arrow.lineTo(10, 26);
+        arrow.lineTo(14, 24);
+        arrow.lineTo(10, 16);
+        arrow.lineTo(17, 16);
+        arrow.close();
+        arrowFill.setColor(Color.WHITE);
+        arrowStroke.setColor(Color.BLACK);
+        arrowStroke.setStyle(Paint.Style.STROKE);
+        arrowStroke.setStrokeWidth(1.5f);
+        arrowStroke.setStrokeJoin(Paint.Join.ROUND);
     }
 
     void setSink(InputSink sink, Connection conn) {
         this.sink = sink;
         this.conn = conn;
         pendingAcks = 0;
+        cursorChannel = false;
+        haveCursor = false;
+        pendingMoves.clear();
     }
+
+    /** The server sends the pointer separately (protocol 2). */
+    void setCursorChannel(boolean on) {
+        cursorChannel = on;
+        haveCursor = false;
+        pendingMoves.clear();
+        invalidate();
+    }
+
+    /** Area the pointer can reach (the whole virtual screen), relative to the streamed monitor. */
+    void setPointerBounds(int l, int t, int r, int b) {
+        boundL = l;
+        boundT = t;
+        boundR = r;
+        boundB = b;
+    }
+
+    /** Pointer report from the PC; it includes every move up to {@code seq}. */
+    void setCursor(int x, int y, int w, int h, int seq, boolean visible) {
+        srvX = x;
+        srvY = y;
+        monW = Math.max(1, w);
+        monH = Math.max(1, h);
+        curVisible = visible;
+        haveCursor = true;
+        while (!pendingMoves.isEmpty() && seqDone(pendingMoves.peekFirst()[0], seq)) pendingMoves.pollFirst();
+        predict();
+        followCursor();
+        invalidate();
+    }
+
+    void setCursorShape(Bitmap bmp, int hx, int hy) {
+        shape = bmp;
+        hotX = hx;
+        hotY = hy;
+        invalidate();
+    }
+
+    private static boolean seqDone(int moveSeq, int ackSeq) {
+        return moveSeq - ackSeq <= 0; // wrap-safe
+    }
+
+    private float clampX(float x) {
+        int l = boundR >= boundL ? boundL : 0, r = boundR >= boundL ? boundR : monW - 1;
+        return Math.max(l, Math.min(r, x));
+    }
+
+    private float clampY(float y) {
+        int t = boundB >= boundT ? boundT : 0, b = boundB >= boundT ? boundB : monH - 1;
+        return Math.max(t, Math.min(b, y));
+    }
+
+    /** Server position plus the moves it has not applied yet. */
+    private void predict() {
+        float x = srvX, y = srvY;
+        for (int[] m : pendingMoves) {
+            if (m[1] == 1) {
+                x = Math.round(m[2] / 65536f * (monW - 1));
+                y = Math.round(m[3] / 65536f * (monH - 1));
+            } else {
+                x = clampX(x + m[2]);
+                y = clampY(y + m[3]);
+            }
+        }
+        predX = x;
+        predY = y;
+    }
+
+    private int nextSeq() {
+        moveSeq++;
+        if (moveSeq == 0) moveSeq = 1;
+        return moveSeq;
+    }
+
+    private void trackMove(int seq, boolean abs, int a, int b) {
+        if (!cursorChannel) return;
+        if (pendingMoves.size() > 400) pendingMoves.pollFirst();
+        pendingMoves.addLast(new int[]{seq, abs ? 1 : 0, a, b});
+        if (haveCursor) {
+            predict();
+            followCursor();
+            invalidate();
+        }
+    }
+
+    /** Pointer position as a fraction of the monitor, or false if it is not on it / unknown. */
+    private boolean pointerFraction(float[] out) {
+        if (cursorChannel) {
+            if (!haveCursor) return false;
+            if (predX < 0 || predY < 0 || predX >= monW || predY >= monH) return false;
+            out[0] = predX / monW;
+            out[1] = predY / monH;
+            return true;
+        }
+        if (cursorX < 0) return false;
+        out[0] = cursorX;
+        out[1] = cursorY;
+        return true;
+    }
+
+    private final float[] tmp2 = new float[2];
 
     void setTouchpad(boolean touchpad) {
         this.touchpad = touchpad;
@@ -141,6 +282,23 @@ final class RemoteView extends View {
         invalidate();
     }
 
+    /** Toolbar zoom: 1× → 2× → 3× → 1×. In touchpad mode the pointer ends up in the centre. */
+    float cycleZoom() {
+        if (frame == null) return zoom;
+        float nz = zoom < 1.5f ? 2f : zoom < 2.5f ? 3f : 1f;
+        float s0 = scale();
+        float ax = (getWidth() / 2f - panX) / s0, ay = (getHeight() / 2f - panY) / s0;
+        zoom = nz;
+        float s1 = scale();
+        panX = getWidth() / 2f - ax * s1;
+        panY = getHeight() / 2f - ay * s1;
+        clampPan();
+        layoutValid = true;
+        followCursor();
+        invalidate();
+        return zoom;
+    }
+
     // ------------------------------------------------------------ geometry
 
     private float baseScale() {
@@ -174,16 +332,16 @@ final class RemoteView extends View {
         layoutValid = false;
     }
 
+    /**
+     * Touchpad mode, zoomed in: keep the pointer in the middle of the phone screen. Near an
+     * edge of the PC screen the view stops (clampPan) and the pointer moves on the phone instead.
+     */
     private void followCursor() {
-        if (!touchpad || zoom <= 1.01f || cursorX < 0 || maxPointers >= 2 || frame == null) return;
-        float cvx = panX + cursorX * dispW();
-        float cvy = panY + cursorY * dispH();
-        float mx = getWidth() * 0.15f, my = getHeight() * 0.15f;
-        if (cvx < mx) panX += mx - cvx;
-        else if (cvx > getWidth() - mx) panX -= cvx - (getWidth() - mx);
-        if (cvy < my) panY += my - cvy;
-        else if (cvy > getHeight() - my) panY -= cvy - (getHeight() - my);
+        if (!touchpad || zoom <= 1.01f || frame == null || !pointerFraction(tmp2)) return;
+        panX = getWidth() / 2f - tmp2[0] * dispW();
+        panY = getHeight() / 2f - tmp2[1] * dispH();
         clampPan();
+        layoutValid = true;
     }
 
     @Override
@@ -195,10 +353,32 @@ final class RemoteView extends View {
             }
             dst.set(panX, panY, panX + dispW(), panY + dispH());
             canvas.drawBitmap(frame, null, dst, paint);
+            if (cursorChannel && curVisible) drawPointer(canvas);
         }
         if (pendingAcks > 0 && conn != null) {
             for (int i = 0; i < pendingAcks; i++) conn.sendAck();
             pendingAcks = 0;
+        }
+    }
+
+    private void drawPointer(Canvas canvas) {
+        if (!pointerFraction(tmp2)) return;
+        float px = panX + tmp2[0] * dispW();
+        float py = panY + tmp2[1] * dispH();
+        float k = dispW() / monW; // phone px per PC px
+        if (shape != null) {
+            float minH = 22 * density;
+            if (shape.getHeight() * k < minH) k = minH / shape.getHeight();
+            dst.set(px - hotX * k, py - hotY * k, px + (shape.getWidth() - hotX) * k, py + (shape.getHeight() - hotY) * k);
+            canvas.drawBitmap(shape, null, dst, paint);
+        } else {
+            float a = Math.max(k, 22 * density / 26f);
+            canvas.save();
+            canvas.translate(px, py);
+            canvas.scale(a, a);
+            canvas.drawPath(arrow, arrowFill);
+            canvas.drawPath(arrow, arrowStroke);
+            canvas.restore();
         }
     }
 
@@ -214,7 +394,9 @@ final class RemoteView extends View {
         float ny = (vy - panY) / dispH();
         nx = Math.max(0f, Math.min(1f, nx));
         ny = Math.max(0f, Math.min(1f, ny));
-        send(Protocol.obj("t", "mm", "x", (double) nx, "y", (double) ny));
+        int seq = nextSeq();
+        send(Protocol.obj("t", "mm", "x", (double) nx, "y", (double) ny, "i", seq));
+        trackMove(seq, true, Math.round(nx * 65536), Math.round(ny * 65536));
     }
 
     private void click(int button, int count) {
@@ -376,7 +558,9 @@ final class RemoteView extends View {
             if (ix != 0 || iy != 0) {
                 fracX -= ix;
                 fracY -= iy;
-                send(Protocol.obj("t", "mr", "dx", ix, "dy", iy));
+                int seq = nextSeq();
+                send(Protocol.obj("t", "mr", "dx", ix, "dy", iy, "i", seq));
+                trackMove(seq, false, ix, iy);
             }
         } else {
             moveAbs(x, y);
@@ -447,8 +631,14 @@ final class RemoteView extends View {
         } else if (twoMode == TWO_ZOOM && frame != null) {
             zoom = Math.max(1f, Math.min(6f, zoom0 * sp / span0));
             float s = scale();
-            panX = fx - anchorX * s;
-            panY = fy - anchorY * s;
+            if (touchpad && pointerFraction(tmp2)) {
+                // touchpad: zoom around the pointer, which stays in the centre
+                panX = getWidth() / 2f - tmp2[0] * dispW();
+                panY = getHeight() / 2f - tmp2[1] * dispH();
+            } else {
+                panX = fx - anchorX * s;
+                panY = fy - anchorY * s;
+            }
             clampPan();
             invalidate();
         }

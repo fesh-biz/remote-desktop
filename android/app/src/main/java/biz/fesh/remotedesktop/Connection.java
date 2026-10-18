@@ -33,6 +33,11 @@ final class Connection {
 
         void onFrame(Bitmap frame, float cursorX, float cursorY);
 
+        /** Pointer position in physical pixels of the streamed monitor (w×h); seq = last move applied. */
+        void onCursor(int x, int y, int w, int h, int seq, boolean visible);
+
+        void onCursorShape(Bitmap shape, int hotX, int hotY);
+
         void onMessage(JSONObject msg);
 
         /** error == null means the user closed it. */
@@ -144,6 +149,12 @@ final class Connection {
                     Bitmap bmp = decode(buf, 8, len - 8);
                     if (bmp != null) listener.onFrame(bmp, cx, cy);
                     else sendAck();
+                } else if (type == Protocol.MSG_CURSOR && len >= 21) {
+                    listener.onCursor(Protocol.readInt(buf, 0), Protocol.readInt(buf, 4), Protocol.readInt(buf, 8),
+                            Protocol.readInt(buf, 12), Protocol.readInt(buf, 16), (buf[20] & 1) != 0);
+                } else if (type == Protocol.MSG_SHAPE && len > 4) {
+                    Bitmap shape = BitmapFactory.decodeByteArray(buf, 4, len - 4);
+                    if (shape != null) listener.onCursorShape(shape, Protocol.readUShort(buf, 0), Protocol.readUShort(buf, 2));
                 } else if (type == Protocol.MSG_JSON) {
                     try {
                         listener.onMessage(new JSONObject(new String(buf, 0, len, StandardCharsets.UTF_8)));

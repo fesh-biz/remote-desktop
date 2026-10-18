@@ -1,5 +1,6 @@
-// Remote Desktop server: streams the PC screen to the Android app over the
-// local network and injects mouse / keyboard input received from it.
+// Remote Desktop server: streams the PC screen to the Android app (and to a
+// browser on a laptop) over the local network and injects mouse / keyboard
+// input received from them. On Windows it lives in the notification area.
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,6 +30,20 @@ type Config struct {
 	Port int    `json:"port"`
 	PIN  string `json:"pin"`
 	Name string `json:"name,omitempty"`
+	// Autostart: start with Windows (missing = first run, switched on).
+	Autostart *bool `json:"autostart,omitempty"`
+}
+
+// App is what the tray menu works with.
+type App struct {
+	srv     *Server
+	cfgMu   sync.Mutex
+	cfg     Config
+	cfgPath string
+	logPath string
+	name    string
+	fw      firewallState
+	startup bool // launched by Windows at sign-in
 }
 
 func main() {
@@ -37,9 +53,12 @@ func main() {
 	pinFlag := flag.String("pin", "", "встановити свій PIN-код")
 	newPin := flag.Bool("newpin", false, "згенерувати новий PIN-код")
 	nameFlag := flag.String("name", "", "ім'я комп'ютера, яке бачить телефон")
+	startup := flag.Bool("startup", false, "запуск разом з Windows (без підказки)")
+	noAuto := flag.Bool("noautostart", false, "не запускати разом з Windows")
 	flag.Parse()
 
 	cfgPath := configPath()
+	logPath := openLog(filepath.Dir(cfgPath))
 	cfg := loadConfig(cfgPath)
 	changed := false
 	if *portFlag > 0 {
@@ -62,8 +81,20 @@ func main() {
 		cfg.Name = *nameFlag
 		changed = true
 	}
+	if *noAuto {
+		cfg.Autostart = boolPtr(false)
+		changed = true
+	} else if cfg.Autostart == nil {
+		cfg.Autostart = boolPtr(true)
+		changed = true
+	}
 	if changed {
 		saveConfig(cfgPath, cfg)
+	}
+
+	if !singleInstance() {
+		showMessage("Remote Desktop", "Remote Desktop уже працює.\n\nЗначок програми — у треї біля годинника (можливо, під стрілкою «^»).")
+		return
 	}
 
 	name := cfg.Name
@@ -75,12 +106,14 @@ func main() {
 	}
 
 	setConsoleTitle("Remote Desktop — сервер")
+	if err := setAutostart(*cfg.Autostart); err != nil {
+		logf("Автозапуск: %v", err)
+	}
 
 	ln, err := net.Listen("tcp4", fmt.Sprintf(":%d", cfg.Port))
 	if err != nil {
-		fmt.Printf("\n  Не вдалося відкрити порт %d: %v\n", cfg.Port, err)
-		fmt.Println("  Можливо, сервер уже запущено в іншому вікні.")
-		waitEnter()
+		logf("Не вдалося відкрити порт %d: %v", cfg.Port, err)
+		showError(fmt.Sprintf("Не вдалося відкрити порт %d.\n%v\n\nМожливо, порт зайнятий іншою програмою.", cfg.Port, err))
 		os.Exit(1)
 	}
 
@@ -89,52 +122,164 @@ func main() {
 
 	printBanner(name, cfg, cfgPath, fw)
 
-	srv := newServer(cfg, name)
-	srv.serve(ln)
+	app := &App{cfg: cfg, cfgPath: cfgPath, logPath: logPath, name: name, fw: fw, startup: *startup}
+	app.srv = newServer(cfg, name)
+	go app.srv.serve(ln)
+	runUI(app) // tray icon on Windows; returns only on exit
+	app.srv.shutdown()
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+func (a *App) config() Config {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	return a.cfg
+}
+
+func (a *App) autostart() bool {
+	c := a.config()
+	return c.Autostart != nil && *c.Autostart
+}
+
+func (a *App) setAutostartPref(on bool) error {
+	if err := setAutostart(on); err != nil {
+		return err
+	}
+	a.cfgMu.Lock()
+	a.cfg.Autostart = boolPtr(on)
+	c := a.cfg
+	a.cfgMu.Unlock()
+	saveConfig(a.cfgPath, c)
+	return nil
+}
+
+func (a *App) newPIN() string {
+	p := randomPIN()
+	a.cfgMu.Lock()
+	a.cfg.PIN = p
+	c := a.cfg
+	a.cfgMu.Unlock()
+	saveConfig(a.cfgPath, c)
+	a.srv.setPIN(p)
+	logf("Згенеровано новий PIN-код")
+	return p
+}
+
+// lanIPs: just the addresses, most likely first.
+func lanIPs() []string {
+	var out []string
+	for _, l := range localIPv4() {
+		out = append(out, strings.Fields(l)[0])
+	}
+	return out
+}
+
+// infoText is shown from the tray: everything needed to connect.
+func (a *App) infoText() string {
+	c := a.config()
+	var b strings.Builder
+	fmt.Fprintf(&b, "Комп'ютер:  %s\n", a.name)
+	ips := lanIPs()
+	if len(ips) == 0 {
+		b.WriteString("Адреса:  мережу не знайдено\n")
+	} else {
+		fmt.Fprintf(&b, "Адреса:  %s\n", strings.Join(ips, ", "))
+	}
+	fmt.Fprintf(&b, "PIN-код:  %s\n\n", c.PIN)
+	b.WriteString("Телефон: відкрийте застосунок Remote Desktop у тій самій Wi-Fi мережі — комп'ютер з'явиться у списку.\n\n")
+	b.WriteString("Ноутбук: відкрийте в браузері\n")
+	if len(ips) == 0 {
+		fmt.Fprintf(&b, "    http://<адреса цього ПК>:%d\n", c.Port)
+	}
+	for _, ip := range ips {
+		fmt.Fprintf(&b, "    http://%s:%d\n", ip, c.Port)
+	}
+	if cl := a.srv.clients(); len(cl) > 0 {
+		b.WriteString("\nПідключено зараз:\n")
+		for _, x := range cl {
+			b.WriteString("    " + x + "\n")
+		}
+	}
+	if a.fw == firewallNotElevated {
+		b.WriteString("\nЯкщо пристрій не бачить ПК — дозвольте доступ у вікні брандмауера або запустіть програму один раз «від імені адміністратора».")
+	}
+	b.WriteString("\n(Ctrl+C копіює цей текст)")
+	return b.String()
 }
 
 func printBanner(name string, cfg Config, cfgPath string, fw firewallState) {
 	line := strings.Repeat("=", 58)
-	fmt.Println(line)
-	fmt.Printf("  Remote Desktop — сервер  (версія %s)\n", version)
-	fmt.Println(line)
-	fmt.Printf("  Комп'ютер : %s\n", name)
+	outln(line)
+	outf("  Remote Desktop — сервер  (версія %s)\n", version)
+	outln(line)
+	outf("  Комп'ютер : %s\n", name)
 	ips := localIPv4()
 	if len(ips) == 0 {
-		fmt.Println("  Адреса    : (мережу не знайдено)")
+		outln("  Адреса    : (мережу не знайдено)")
 	}
 	for i, ip := range ips {
 		label := "  Адреса    :"
 		if i > 0 {
 			label = "             "
 		}
-		fmt.Printf("%s %s\n", label, ip)
+		outf("%s %s\n", label, ip)
 	}
-	fmt.Printf("  Порт      : %d\n", cfg.Port)
-	fmt.Printf("  PIN-код   : %s\n", cfg.PIN)
-	fmt.Println(strings.Repeat("-", 58))
-	fmt.Println("  1. Підключіть телефон до тієї ж Wi-Fi мережі.")
-	fmt.Println("  2. Відкрийте застосунок Remote Desktop — ПК з'явиться у списку.")
-	fmt.Println("  3. Введіть PIN-код. Закрийте це вікно, щоб зупинити сервер.")
+	outf("  Порт      : %d\n", cfg.Port)
+	outf("  PIN-код   : %s\n", cfg.PIN)
+	outln(strings.Repeat("-", 58))
+	outln("  Телефон: застосунок Remote Desktop у тій самій Wi-Fi мережі.")
+	if len(ips) > 0 {
+		outf("  Ноутбук: браузер → http://%s:%d\n", strings.Fields(ips[0])[0], cfg.Port)
+	}
 	switch fw {
 	case firewallAdded:
-		fmt.Println("  Брандмауер: правило для вхідних підключень додано.")
+		outln("  Брандмауер: правило для вхідних підключень додано.")
 	case firewallNotElevated:
-		fmt.Println("  Якщо телефон не бачить ПК — дозвольте доступ у вікні брандмауера")
-		fmt.Println("  або запустіть програму один раз «від імені адміністратора».")
+		outln("  Якщо пристрій не бачить ПК — дозвольте доступ у вікні брандмауера")
+		outln("  або запустіть програму один раз «від імені адміністратора».")
 	}
-	fmt.Printf("  Налаштування: %s\n", cfgPath)
-	fmt.Println(line)
+	outf("  Налаштування: %s\n", cfgPath)
+	outln(line)
 }
+
+// ---------------------------------------------------------------- log
+
+var (
+	logMu   sync.Mutex
+	logFile *os.File
+)
+
+// openLog keeps a small log next to the settings: without a console window
+// it is the only place to see what happened.
+func openLog(dir string) string {
+	p := filepath.Join(dir, "remote-desktop.log")
+	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	if fi, err := os.Stat(p); err == nil && fi.Size() > 512<<10 {
+		flags |= os.O_TRUNC
+	}
+	f, err := os.OpenFile(p, flags, 0o644)
+	if err != nil {
+		return ""
+	}
+	logFile = f
+	return p
+}
+
+func outf(format string, a ...any) {
+	s := fmt.Sprintf(format, a...)
+	logMu.Lock()
+	defer logMu.Unlock()
+	os.Stdout.WriteString(s)
+	if logFile != nil {
+		logFile.WriteString(s)
+	}
+}
+
+func outln(s string) { outf("%s\n", s) }
 
 func logf(format string, a ...any) {
-	fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, a...))
-}
-
-func waitEnter() {
-	fmt.Println("\n  Натисніть Enter, щоб закрити...")
-	var s string
-	fmt.Scanln(&s)
+	outf("[%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), fmt.Sprintf(format, a...))
 }
 
 func configPath() string {

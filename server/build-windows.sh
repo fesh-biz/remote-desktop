@@ -16,5 +16,5 @@ else
   echo "windres not found: building without icon/manifest" >&2
 fi
 mkdir -p "$(dirname "$OUT")"
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$OUT" .
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$VERSION" -o "$OUT" .
 echo "built $OUT"

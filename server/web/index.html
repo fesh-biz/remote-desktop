@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote Desktop</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+  :root {
+    --bg: #0f172a; --card: #1e293b; --line: #334155; --text: #f1f5f9; --muted: #94a3b8;
+    --accent: #3b82f6; --accent2: #7c3aed; --danger: #f87171;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.4 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; overflow: hidden; }
+  button, input, select { font: inherit; color: inherit; }
+  .hidden { display: none !important; }
+
+  /* login */
+  #login { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .card { width: 100%; max-width: 360px; background: var(--card); border: 1px solid var(--line);
+    border-radius: 16px; padding: 28px 24px; box-shadow: 0 20px 50px rgba(0,0,0,.35); }
+  .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+  .brand img { width: 40px; height: 40px; }
+  .brand h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .brand p { margin: 0; color: var(--muted); font-size: 13px; }
+  label { display: block; color: var(--muted); font-size: 13px; margin: 0 0 6px; }
+  #pin { width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--bg); font-size: 22px; letter-spacing: .3em; text-align: center; outline: none; }
+  #pin:focus { border-color: var(--accent); }
+  .primary { width: 100%; margin-top: 14px; padding: 12px; border: 0; border-radius: 10px; cursor: pointer;
+    background: linear-gradient(90deg, var(--accent), var(--accent2)); font-weight: 600; }
+  .primary:disabled { opacity: .6; cursor: default; }
+  #loginErr { color: var(--danger); min-height: 20px; margin-top: 10px; font-size: 14px; }
+  .hint { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+
+  /* remote screen */
+  #stage { position: fixed; inset: 0; background: #000; display: flex; align-items: center; justify-content: center; }
+  #screen, #overlay { position: absolute; touch-action: none; }
+  #overlay { pointer-events: none; }
+  #status { position: absolute; color: #cbd5e1; text-align: center; padding: 24px; max-width: 520px; }
+  #status button { margin-top: 12px; width: auto; padding: 10px 22px; }
+
+  /* toolbar: slides down when the mouse is at the top edge */
+  #hot { position: fixed; top: 0; left: 0; right: 0; height: 6px; z-index: 5; }
+  #bar { position: fixed; top: 0; left: 0; right: 0; margin: 0 auto; width: fit-content; z-index: 6; transform: translateY(-110%);
+    transition: transform .16s ease-out; display: flex; gap: 4px; align-items: center; flex-wrap: wrap; justify-content: center;
+    max-width: calc(100vw - 16px); padding: 6px; background: rgba(30,41,59,.96); border: 1px solid var(--line);
+    border-top: 0; border-radius: 0 0 14px 14px; box-shadow: 0 10px 30px rgba(0,0,0,.4); }
+  #bar.show { transform: none; }
+  #bar .name { padding: 0 10px; color: var(--muted); font-size: 13px; white-space: nowrap; }
+  #bar button { border: 0; background: transparent; padding: 7px 11px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+  #bar button:hover { background: #334155; }
+  #bar .sep { width: 1px; align-self: stretch; background: var(--line); margin: 4px 2px; }
+  #pinBtn.on { background: #334155; }
+
+  #panel { position: fixed; top: 56px; left: 50%; transform: translateX(-50%); z-index: 7; width: 300px;
+    max-width: calc(100vw - 32px); background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px;
+    box-shadow: 0 20px 50px rgba(0,0,0,.45); }
+  #panel h2 { font-size: 15px; margin: 0 0 12px; }
+  #panel .row { margin-bottom: 12px; }
+  #panel select, #panel input[type=range] { width: 100%; }
+  #panel select { padding: 7px 8px; border-radius: 8px; background: var(--bg); border: 1px solid var(--line); }
+  #panel .val { float: right; color: var(--muted); }
+  #panel .keys { color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--line); padding-top: 10px; }
+  #toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 8;
+    background: rgba(15,23,42,.92); border: 1px solid var(--line); border-radius: 10px; padding: 9px 16px; font-size: 14px;
+    transition: opacity .2s; opacity: 0; pointer-events: none; }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <form class="card" id="loginForm" autocomplete="off">
+    <div class="brand">
+      <img src="/favicon.ico" alt="">
+      <div><h1>Remote Desktop</h1><p id="hostLabel"></p></div>
+    </div>
+    <label for="pin">PIN-код (є в меню значка Remote Desktop у треї комп'ютера)</label>
+    <input id="pin" inputmode="numeric" maxlength="12" autofocus>
+    <button class="primary" id="go" type="submit">Підключитися</button>
+    <div id="loginErr"></div>
+    <div class="hint">Мишка й клавіатура ноутбука керуватимуть комп'ютером. Панель з додатковими кнопками з'являється, якщо підвести мишку до верхнього краю екрана.</div>
+  </form>
+</div>
+
+<div id="stage" class="hidden">
+  <canvas id="screen"></canvas>
+  <canvas id="overlay"></canvas>
+  <div id="status"></div>
+</div>
+
+<div id="hot" class="hidden"></div>
+<div id="bar" class="hidden">
+  <span class="name" id="barName"></span>
+  <button id="monBtn" class="hidden" title="Перемкнути монітор">🖥 1/1</button>
+  <span class="sep"></span>
+  <button data-combo="91" title="Клавіша Windows">Win</button>
+  <button data-combo="18,9" title="Перемкнути вікно">Alt+Tab</button>
+  <button data-combo="91,68" title="Показати робочий стіл">Win+D</button>
+  <button data-combo="17,16,27" title="Диспетчер задач">Диспетчер</button>
+  <button id="textBtn" title="Надрукувати текст з ноутбука">Текст…</button>
+  <span class="sep"></span>
+  <button id="setBtn" title="Якість зображення">⚙</button>
+  <button id="fsBtn" title="На весь екран">⛶</button>
+  <button id="pinBtn" title="Не ховати панель">📌</button>
+  <button id="quitBtn" title="Відключитися">✕</button>
+</div>
+
+<div id="panel" class="hidden">
+  <h2>Зображення</h2>
+  <div class="row"><label for="resSel">Роздільність</label>
+    <select id="resSel">
+      <option value="960">960 px — найшвидше</option>
+      <option value="1280">1280 px — HD</option>
+      <option value="1920">1920 px — Full HD</option>
+      <option value="0">Оригінальна</option>
+    </select></div>
+  <div class="row"><label for="qRange">Якість <span class="val" id="qVal"></span></label>
+    <input type="range" id="qRange" min="20" max="90" step="5"></div>
+  <div class="row"><label for="fpsSel">Кадрів на секунду</label>
+    <select id="fpsSel"><option>15</option><option>30</option><option>60</option></select></div>
+  <div class="keys">Клавіші ноутбука передаються як є, розкладку перемикає комп'ютер (Alt+Shift або Win+Пробіл). Win, Alt+Tab і Ctrl+Alt+Del перехоплює система ноутбука — для перших двох є кнопки на панелі.</div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+(() => {
+const $ = id => document.getElementById(id);
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("rd_" + k); return v === null ? d : v; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem("rd_" + k, v); } catch (e) {} },
+  del(k) { try { localStorage.removeItem("rd_" + k); } catch (e) {} },
+};
+
+// ------------------------------------------------------------ keys: KeyboardEvent.code → Windows virtual-key
+const VK = {
+  Backspace: 8, Tab: 9, Enter: 13, NumpadEnter: 13, ShiftLeft: 0xA0, ShiftRight: 0xA1, ControlLeft: 0xA2,
+  ControlRight: 0xA3, AltLeft: 0xA4, AltRight: 0xA5, Pause: 0x13, CapsLock: 0x14, Escape: 0x1B, Space: 0x20,
+  PageUp: 0x21, PageDown: 0x22, End: 0x23, Home: 0x24, ArrowLeft: 0x25, ArrowUp: 0x26, ArrowRight: 0x27,
+  ArrowDown: 0x28, PrintScreen: 0x2C, Insert: 0x2D, Delete: 0x2E, MetaLeft: 0x5B, MetaRight: 0x5C,
+  OSLeft: 0x5B, OSRight: 0x5C, ContextMenu: 0x5D, NumpadMultiply: 0x6A, NumpadAdd: 0x6B, NumpadSubtract: 0x6D,
+  NumpadDecimal: 0x6E, NumpadDivide: 0x6F, NumLock: 0x90, ScrollLock: 0x91, Semicolon: 0xBA, Equal: 0xBB,
+  Comma: 0xBC, Minus: 0xBD, Period: 0xBE, Slash: 0xBF, Backquote: 0xC0, BracketLeft: 0xDB, Backslash: 0xDC,
+  BracketRight: 0xDD, Quote: 0xDE, IntlBackslash: 0xE2, AudioVolumeMute: 0xAD, AudioVolumeDown: 0xAE,
+  AudioVolumeUp: 0xAF, MediaTrackNext: 0xB0, MediaTrackPrevious: 0xB1, MediaStop: 0xB2, MediaPlayPause: 0xB3,
+};
+function vkOf(code) {
+  if (VK[code]) return VK[code];
+  let m;
+  if ((m = /^Key([A-Z])$/.exec(code))) return m[1].charCodeAt(0);
+  if ((m = /^Digit(\d)$/.exec(code))) return 0x30 + +m[1];
+  if ((m = /^Numpad(\d)$/.exec(code))) return 0x60 + +m[1];
+  if ((m = /^F(\d{1,2})$/.exec(code)) && +m[1] >= 1 && +m[1] <= 24) return 0x6F + +m[1];
+  return 0;
+}
+
+// ------------------------------------------------------------ connection
+const enc = new TextEncoder(), dec = new TextDecoder();
+let ws = null, authed = false, wantConnected = false, retryTimer = 0, pingTimer = 0;
+let mons = [], monIndex = 0, hostName = "";
+
+function sendRaw(type, bytes) {
+  if (!ws || ws.readyState !== 1) return;
+  const b = new Uint8Array(1 + (bytes ? bytes.length : 0));
+  b[0] = type.charCodeAt(0);
+  if (bytes) b.set(bytes, 1);
+  ws.send(b);
+}
+const send = o => { if (authed || o.t === "hello") sendRaw("J", enc.encode(JSON.stringify(o))); };
+
+function connect() {
+  clearTimeout(retryTimer);
+  wantConnected = true;
+  showStatus("Підключення…");
+  const sock = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  sock.binaryType = "arraybuffer";
+  ws = sock;
+  sock.onopen = () => {
+    const ua = navigator.userAgentData && navigator.userAgentData.platform || navigator.platform || "";
+    send({ t: "hello", pin: $("pin").value.trim(), client: "Браузер" + (ua ? " (" + ua + ")" : ""), ver: 2 });
+  };
+  sock.onmessage = e => { if (ws === sock) onMessage(new Uint8Array(e.data)); };
+  sock.onclose = () => {
+    if (ws !== sock) return;
+    ws = null;
+    clearInterval(pingTimer);
+    const was = authed;
+    authed = false;
+    releaseKeys(true);
+    if (!wantConnected) return;
+    if (was || $("stage").classList.contains("hidden") === false) {
+      showStatus("З'єднання розірвано. Повторне підключення…", true);
+      retryTimer = setTimeout(connect, 2000);
+    } else {
+      loginError("Не вдалося підключитися до комп'ютера.");
+    }
+  };
+}
+
+function disconnect() {
+  wantConnected = false;
+  clearTimeout(retryTimer);
+  if (ws) { const s = ws; ws = null; s.close(); }
+  authed = false;
+  releaseKeys(true);
+  showLogin();
+}
+
+function onMessage(b) {
+  const type = String.fromCharCode(b[0]);
+  if (type === "F") return onFrame(b);
+  if (type === "C") return onCursor(new DataView(b.buffer, b.byteOffset + 1, b.length - 1));
+  if (type === "S") return onShape(b);
+  if (type !== "J") return;
+  let m;
+  try { m = JSON.parse(dec.decode(b.subarray(1))); } catch (e) { return; }
+  if (m.t === "auth") {
+    if (!m.ok) {
+      wantConnected = false;
+      store.del("pin");
+      if (ws) ws.close();
+      loginError(m.msg || "Доступ заборонено");
+      return;
+    }
+    authed = true;
+    store.set("pin", $("pin").value.trim());
+    hostName = m.host || location.hostname;
+    document.title = "Remote Desktop — " + hostName;
+    $("barName").textContent = hostName;
+    mons = m.mons || [];
+    if (monIndex >= mons.length) monIndex = 0;
+    updateMonBtn();
+    showStage();
+    sendConfig();
+    clearInterval(pingTimer);
+    pingTimer = setInterval(() => send({ t: "ping" }), 2500);
+  } else if (m.t === "mons") {
+    mons = m.mons || [];
+    if (monIndex >= mons.length) { monIndex = 0; sendConfig(); }
+    updateMonBtn();
+  } else if (m.t === "error") {
+    toast(m.msg);
+  }
+}
+
+function sendConfig() {
+  send({ t: "cfg", q: +store.get("q", 60), maxw: +store.get("maxw", 1920), fps: +store.get("fps", 30), mon: monIndex });
+}
+
+// ------------------------------------------------------------ picture
+const screen = $("screen"), ctx = screen.getContext("2d", { alpha: false });
+const overlay = $("overlay"), octx = overlay.getContext("2d");
+let decoding = Promise.resolve(), hasFrame = false;
+
+function onFrame(b) {
+  const blob = new Blob([b.subarray(9)], { type: "image/jpeg" });
+  decoding = decoding
+    .then(() => createImageBitmap(blob))
+    .then(bmp => {
+      if (screen.width !== bmp.width || screen.height !== bmp.height) {
+        screen.width = bmp.width;
+        screen.height = bmp.height;
+        layout();
+      }
+      ctx.drawImage(bmp, 0, 0);
+      bmp.close();
+      if (!hasFrame) { hasFrame = true; hideStatus(); layout(); }
+    })
+    .catch(() => {})
+    .then(() => sendRaw("A"));
+}
+
+let viewW = 0, viewH = 0, viewL = 0, viewT = 0;
+function layout() {
+  if (!screen.width) return;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const s = Math.min(vw / screen.width, vh / screen.height);
+  viewW = Math.round(screen.width * s);
+  viewH = Math.round(screen.height * s);
+  viewL = Math.round((vw - viewW) / 2);
+  viewT = Math.round((vh - viewH) / 2);
+  for (const c of [screen, overlay]) {
+    c.style.width = viewW + "px";
+    c.style.height = viewH + "px";
+    c.style.left = viewL + "px";
+    c.style.top = viewT + "px";
+  }
+  const dpr = window.devicePixelRatio || 1;
+  overlay.width = Math.max(1, Math.round(viewW * dpr));
+  overlay.height = Math.max(1, Math.round(viewH * dpr));
+  updateCssCursor();
+  drawOverlay();
+}
+window.addEventListener("resize", layout);
+
+// ------------------------------------------------------------ remote pointer
+// The laptop's own mouse pointer is the PC pointer: it gets the PC pointer's
+// image. The overlay draws the PC pointer only when the mouse is outside the
+// picture or the pointer was moved on the PC itself.
+const cur = { x: -1, y: -1, w: 1, h: 1, visible: false, img: null, hx: 0, hy: 0, shapeW: 32, shapeH: 32 };
+let pointerInside = false, lastLocalMove = 0, lastSentPx = { x: -1e9, y: -1e9 };
+
+function onCursor(dv) {
+  cur.x = dv.getInt32(0); cur.y = dv.getInt32(4);
+  cur.w = Math.max(1, dv.getInt32(8)); cur.h = Math.max(1, dv.getInt32(12));
+  cur.visible = (dv.getUint8(20) & 1) === 1;
+  drawOverlay();
+}
+
+function onShape(b) {
+  const hx = (b[1] << 8) | b[2], hy = (b[3] << 8) | b[4];
+  const url = URL.createObjectURL(new Blob([b.subarray(5)], { type: "image/png" }));
+  const img = new Image();
+  img.onload = () => {
+    cur.img = img; cur.hx = hx; cur.hy = hy; cur.shapeW = img.naturalWidth; cur.shapeH = img.naturalHeight;
+    updateCssCursor();
+    drawOverlay();
+    URL.revokeObjectURL(url);
+  };
+  img.src = url;
+}
+
+function cursorScale() { return viewW / cur.w; } // CSS px per PC px
+
+let cssCursorKey = "";
+function updateCssCursor() {
+  if (!cur.img || !viewW) { screen.style.cursor = "default"; return; }
+  let s = cursorScale();
+  const minH = 14, maxSide = 96;
+  if (cur.shapeH * s < minH) s = minH / cur.shapeH;
+  if (Math.max(cur.shapeW, cur.shapeH) * s > maxSide) s = maxSide / Math.max(cur.shapeW, cur.shapeH);
+  const dpr = window.devicePixelRatio || 1;
+  const key = cur.img.src + "|" + s.toFixed(3) + "|" + dpr;
+  if (key === cssCursorKey) return;
+  cssCursorKey = key;
+  const cw = Math.max(1, Math.round(cur.shapeW * s)), ch = Math.max(1, Math.round(cur.shapeH * s));
+  const c = document.createElement("canvas");
+  c.width = Math.round(cw * dpr); c.height = Math.round(ch * dpr);
+  const g = c.getContext("2d");
+  g.imageSmoothingQuality = "high";
+  g.drawImage(cur.img, 0, 0, c.width, c.height);
+  const hx = Math.min(cw - 1, Math.round(cur.hx * s)), hy = Math.min(ch - 1, Math.round(cur.hy * s));
+  const hiUrl = c.toDataURL("image/png");
+  // fallback at 1:1 first, then the sharper image-set version where supported
+  const c1 = document.createElement("canvas");
+  c1.width = cw; c1.height = ch;
+  c1.getContext("2d").drawImage(cur.img, 0, 0, cw, ch);
+  screen.style.cursor = `url(${c1.toDataURL("image/png")}) ${hx} ${hy}, default`;
+  if (dpr !== 1) screen.style.cursor = `image-set(url(${hiUrl}) ${dpr}x) ${hx} ${hy}, default`;
+}
+
+function drawOverlay() {
+  if (!overlay.width) return;
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  if (!cur.visible || !cur.img || cur.x < 0 || cur.y < 0 || cur.x >= cur.w || cur.y >= cur.h) return;
+  const movedElsewhere = Math.abs(cur.x - lastSentPx.x) > 3 || Math.abs(cur.y - lastSentPx.y) > 3;
+  if (pointerInside && !(movedElsewhere && performance.now() - lastLocalMove > 400)) return;
+  const dpr = window.devicePixelRatio || 1;
+  let s = cursorScale();
+  if (cur.shapeH * s < 14) s = 14 / cur.shapeH;
+  const k = s * dpr;
+  const px = cur.x / cur.w * overlay.width, py = cur.y / cur.h * overlay.height;
+  octx.drawImage(cur.img, px - cur.hx * k, py - cur.hy * k, cur.shapeW * k, cur.shapeH * k);
+}
+
+// ------------------------------------------------------------ mouse
+let moveSeq = 0, pendingMove = null, moveScheduled = false;
+const BTN = { 0: 0, 1: 2, 2: 1 }; // browser button → server (0 left, 1 right, 2 middle)
+
+function norm(e) {
+  const x = Math.min(1, Math.max(0, (e.clientX - viewL) / viewW));
+  const y = Math.min(1, Math.max(0, (e.clientY - viewT) / viewH));
+  return { x, y };
+}
+function flushMove() {
+  moveScheduled = false;
+  if (!pendingMove) return;
+  const p = pendingMove;
+  pendingMove = null;
+  moveSeq = (moveSeq + 1) >>> 0 || 1;
+  lastSentPx = { x: Math.round(p.x * (cur.w - 1)), y: Math.round(p.y * (cur.h - 1)) };
+  send({ t: "mm", x: p.x, y: p.y, i: moveSeq });
+}
+function queueMove(e) {
+  if (!authed || !viewW) return;
+  pendingMove = norm(e);
+  lastLocalMove = performance.now();
+  if (!moveScheduled) { moveScheduled = true; requestAnimationFrame(flushMove); }
+}
+
+screen.addEventListener("pointermove", e => {
+  const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+  queueMove(evs.length ? evs[evs.length - 1] : e);
+});
+screen.addEventListener("pointerenter", () => { pointerInside = true; drawOverlay(); });
+screen.addEventListener("pointerleave", () => { pointerInside = false; drawOverlay(); });
+screen.addEventListener("pointerdown", e => {
+  if (!authed || !(e.button in BTN)) return;
+  e.preventDefault();
+  closePanel();
+  screen.setPointerCapture(e.pointerId);
+  pendingMove = norm(e); flushMove();
+  send({ t: "mb", b: BTN[e.button], d: true });
+});
+screen.addEventListener("pointerup", e => {
+  if (!authed || !(e.button in BTN)) return;
+  e.preventDefault();
+  pendingMove = norm(e); flushMove();
+  send({ t: "mb", b: BTN[e.button], d: false });
+});
+screen.addEventListener("pointercancel", () => { for (const b of [0, 1, 2]) send({ t: "mb", b, d: false }); });
+screen.addEventListener("contextmenu", e => e.preventDefault());
+// no middle-click autoscroll, no back/forward navigation from mouse side buttons
+for (const t of ["mousedown", "mouseup", "auxclick"]) screen.addEventListener(t, e => { if (e.button !== 0) e.preventDefault(); });
+
+let wheelX = 0, wheelY = 0;
+screen.addEventListener("wheel", e => {
+  e.preventDefault();
+  if (!authed) return;
+  const k = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1.2;
+  wheelY += -e.deltaY * k;
+  wheelX += e.deltaX * k;
+  const dy = Math.trunc(wheelY), dx = Math.trunc(wheelX);
+  if (!dy && !dx) return;
+  wheelY -= dy; wheelX -= dx;
+  // a touchpad pinch arrives as Ctrl+wheel: zoom on the PC too
+  const fakeCtrl = e.ctrlKey && !held.has(0xA2) && !held.has(0xA3);
+  if (fakeCtrl) send({ t: "key", vk: 0x11, d: true });
+  send({ t: "wh", dy, dx });
+  if (fakeCtrl) send({ t: "key", vk: 0x11, d: false });
+}, { passive: false });
+
+// ------------------------------------------------------------ keyboard
+const held = new Set();
+function inForm(e) {
+  const t = e.target;
+  return t && (t.closest && (t.closest("#panel") || t.closest("#login"))) ||
+    (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA"));
+}
+document.addEventListener("keydown", e => {
+  if (!authed || inForm(e)) return;
+  const vk = vkOf(e.code);
+  if (!vk) return;
+  e.preventDefault();
+  held.add(vk);
+  send({ t: "key", vk, d: true });
+}, true);
+document.addEventListener("keyup", e => {
+  if (!authed || inForm(e)) return;
+  const vk = vkOf(e.code);
+  if (!vk) return;
+  e.preventDefault();
+  if (held.delete(vk)) send({ t: "key", vk, d: false });
+  else if (vk === 0x2C) send({ t: "tap", vk }); // PrintScreen: browsers only report the release
+}, true);
+function releaseKeys(local) {
+  if (!local) for (const vk of held) send({ t: "key", vk, d: false });
+  held.clear();
+}
+window.addEventListener("blur", () => releaseKeys(false));
+document.addEventListener("visibilitychange", () => { if (document.hidden) releaseKeys(false); });
+
+// ------------------------------------------------------------ toolbar
+const bar = $("bar");
+let barPinned = store.get("barPinned", "0") === "1", barTimer = 0, overBar = false;
+$("pinBtn").classList.toggle("on", barPinned);
+function showBar() { clearTimeout(barTimer); bar.classList.add("show"); }
+function hideBarSoon() {
+  clearTimeout(barTimer);
+  if (barPinned || overBar || !$("panel").classList.contains("hidden")) return;
+  barTimer = setTimeout(() => { if (!overBar) bar.classList.remove("show"); }, 700);
+}
+const intoBar = e => e.relatedTarget && (e.relatedTarget === bar || bar.contains(e.relatedTarget) || e.relatedTarget.id === "hot");
+for (const el of [$("hot"), bar]) {
+  el.addEventListener("pointerenter", () => { overBar = true; showBar(); });
+  el.addEventListener("pointerleave", e => { if (!intoBar(e)) { overBar = false; hideBarSoon(); } });
+}
+bar.addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  b.blur();
+  if (b.dataset.combo) send({ t: "combo", vks: b.dataset.combo.split(",").map(Number) });
+});
+$("pinBtn").onclick = () => {
+  barPinned = !barPinned;
+  store.set("barPinned", barPinned ? "1" : "0");
+  $("pinBtn").classList.toggle("on", barPinned);
+  if (barPinned) showBar(); else hideBarSoon();
+};
+$("quitBtn").onclick = disconnect;
+$("fsBtn").onclick = () => {
+  if (document.fullscreenElement) { document.exitFullscreen(); return; }
+  document.documentElement.requestFullscreen().then(() => {
+    // full keyboard capture (Win, Alt+Tab, Esc) where the browser allows it
+    if (navigator.keyboard && navigator.keyboard.lock) navigator.keyboard.lock().catch(() => {});
+  }).catch(() => {});
+};
+$("textBtn").onclick = () => {
+  const s = prompt("Текст, який буде надруковано на комп'ютері:");
+  if (s) send({ t: "text", s });
+};
+$("monBtn").onclick = () => {
+  if (mons.length < 2) return;
+  monIndex = (monIndex + 1) % mons.length;
+  updateMonBtn();
+  sendConfig();
+};
+function updateMonBtn() {
+  $("monBtn").classList.toggle("hidden", mons.length < 2);
+  $("monBtn").textContent = "🖥 " + (monIndex + 1) + "/" + Math.max(1, mons.length);
+}
+
+// settings panel
+function closePanel() { $("panel").classList.add("hidden"); hideBarSoon(); }
+$("setBtn").onclick = () => {
+  const p = $("panel");
+  if (!p.classList.contains("hidden")) { closePanel(); return; }
+  $("resSel").value = store.get("maxw", "1920");
+  $("qRange").value = store.get("q", "60");
+  $("qVal").textContent = $("qRange").value + "%";
+  $("fpsSel").value = store.get("fps", "30");
+  p.classList.remove("hidden");
+  showBar();
+};
+$("resSel").onchange = () => { store.set("maxw", $("resSel").value); sendConfig(); };
+$("qRange").oninput = () => { $("qVal").textContent = $("qRange").value + "%"; };
+$("qRange").onchange = () => { store.set("q", $("qRange").value); sendConfig(); };
+$("fpsSel").onchange = () => { store.set("fps", $("fpsSel").value); sendConfig(); };
+
+// ------------------------------------------------------------ screens
+let toastTimer = 0;
+function toast(s) {
+  const t = $("toast");
+  t.textContent = s;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 3500);
+}
+function showStatus(text, withButton) {
+  const st = $("status");
+  st.textContent = text;
+  if (withButton) {
+    const b = document.createElement("button");
+    b.className = "primary";
+    b.textContent = "Відключитися";
+    b.onclick = disconnect;
+    st.appendChild(document.createElement("br"));
+    st.appendChild(b);
+  }
+  st.classList.remove("hidden");
+}
+function hideStatus() { $("status").classList.add("hidden"); }
+function showStage() {
+  $("login").classList.add("hidden");
+  $("stage").classList.remove("hidden");
+  $("hot").classList.remove("hidden");
+  bar.classList.remove("hidden");
+  if (hasFrame) hideStatus(); else showStatus("Отримання зображення…");
+  // show the toolbar for a moment so it is clear where it lives
+  showBar();
+  clearTimeout(barTimer);
+  barTimer = setTimeout(hideBarSoon, 2000);
+}
+function showLogin() {
+  hasFrame = false;
+  document.title = "Remote Desktop";
+  $("stage").classList.add("hidden");
+  $("hot").classList.add("hidden");
+  bar.classList.add("hidden");
+  closePanel();
+  $("login").classList.remove("hidden");
+  $("go").disabled = false;
+  $("pin").focus();
+}
+function loginError(msg) {
+  showLogin();
+  $("loginErr").textContent = msg;
+}
+
+$("hostLabel").textContent = location.hostname;
+$("loginForm").addEventListener("submit", e => {
+  e.preventDefault();
+  if (!$("pin").value.trim()) { $("pin").focus(); return; }
+  $("loginErr").textContent = "";
+  $("go").disabled = true;
+  connect();
+});
+const saved = store.get("pin", "");
+if (saved) {
+  $("pin").value = saved;
+  $("go").disabled = true;
+  connect();
+}
+})();
+</script>
+</body>
+</html>

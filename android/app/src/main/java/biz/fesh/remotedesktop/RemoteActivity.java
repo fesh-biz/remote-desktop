@@ -65,6 +65,7 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
     private final Map<Integer, TextView> stickyButtons = new HashMap<>();
     private final Set<Integer> sticky = new LinkedHashSet<>();
     private int monCount = 1, monIndex = 0;
+    private JSONArray monList, virtualScreen;
     private boolean keyboardVisible;
 
     @Override
@@ -166,6 +167,11 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
         fixed.addView(button("✕", v -> setToolbarVisible(false)));
 
         // extra row
+        extra.addView(button("🔍", v -> {
+            float z = remote.cycleZoom();
+            Toast.makeText(this, z > 1.01f ? "Збільшення " + Math.round(z) + "×" : "Без збільшення", Toast.LENGTH_SHORT).show();
+        }));
+        extra.addView(button("1:1", v -> remote.resetZoom()));
         for (int f = 0; f < 12; f++) {
             final int vk = Protocol.VK_F1 + f;
             extra.addView(button("F" + (f + 1), v -> tapKey(vk)));
@@ -194,7 +200,6 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
         extra.addView(button("⏮", v -> tapKey(Protocol.VK_MEDIA_PREV)));
         extra.addView(button("⏯", v -> tapKey(Protocol.VK_MEDIA_PLAY_PAUSE)));
         extra.addView(button("⏭", v -> tapKey(Protocol.VK_MEDIA_NEXT)));
-        extra.addView(button("1:1", v -> remote.resetZoom()));
         extra.addView(button("?", v -> showHelp()));
 
         setContentView(root);
@@ -309,9 +314,22 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
     private void nextMonitor() {
         if (monCount < 2) return;
         monIndex = (monIndex + 1) % monCount;
+        updatePointerBounds();
         updateMonitorButton();
         remote.resetZoom();
         sendConfig();
+    }
+
+    /** The pointer can leave the streamed monitor only within the whole virtual screen. */
+    private void updatePointerBounds() {
+        JSONObject m = monList != null ? monList.optJSONObject(monIndex) : null;
+        if (m == null || virtualScreen == null || virtualScreen.length() < 4 || !m.has("x")) {
+            remote.setPointerBounds(0, 0, -1, -1); // unknown: the monitor itself
+            return;
+        }
+        int mx = m.optInt("x"), my = m.optInt("y");
+        int vx = virtualScreen.optInt(0), vy = virtualScreen.optInt(1), vw = virtualScreen.optInt(2), vh = virtualScreen.optInt(3);
+        remote.setPointerBounds(vx - mx, vy - my, vx + vw - 1 - mx, vy + vh - 1 - my);
     }
 
     private void hideSystemBars() {
@@ -360,6 +378,20 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
             }
 
             @Override
+            public void onCursor(int x, int y, int w, int h, int seq, boolean visible) {
+                ui.post(() -> {
+                    if (gen == generation) remote.setCursor(x, y, w, h, seq, visible);
+                });
+            }
+
+            @Override
+            public void onCursorShape(Bitmap shape, int hotX, int hotY) {
+                ui.post(() -> {
+                    if (gen == generation) remote.setCursorShape(shape, hotX, hotY);
+                });
+            }
+
+            @Override
             public void onMessage(JSONObject msg) {
                 ui.post(() -> {
                     if (gen == generation) onMessageUi(msg);
@@ -384,9 +416,13 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
         if (!hostName.isEmpty()) name = hostName;
         prefs.setPin(host, port, pin);
         prefs.addRecent(new Prefs.Host(name, host, port));
+        remote.setCursorChannel(auth.optInt("ver", 1) >= 2);
         JSONArray mons = auth.optJSONArray("mons");
         monCount = mons != null ? Math.max(1, mons.length()) : 1;
         if (monIndex >= monCount) monIndex = 0;
+        monList = mons;
+        virtualScreen = auth.optJSONArray("vs");
+        updatePointerBounds();
         updateMonitorButton();
         sendConfig();
         status.setText("Отримання зображення…");
@@ -405,6 +441,9 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
                 monIndex = 0;
                 sendConfig();
             }
+            monList = mons;
+            if (msg.has("vs")) virtualScreen = msg.optJSONArray("vs");
+            updatePointerBounds();
             updateMonitorButton();
         } else if ("error".equals(t)) {
             Toast.makeText(this, msg.optString("msg"), Toast.LENGTH_LONG).show();
@@ -619,7 +658,7 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
                 + "• Подвійний дотик і ведення — перетягування\n"
                 + "• Довге натискання або дотик двома пальцями — права кнопка\n"
                 + "• Два пальці вгору/вниз — прокрутка\n"
-                + "• Розведення двох пальців — збільшення\n\n"
+                + "• Розведення двох пальців — збільшення; курсор тоді тримається в центрі екрана\n\n"
                 + "Режим «👆 Дотик»\n"
                 + "• Курсор переходить туди, де ви торкнулися\n"
                 + "• Ведення пальцем — перетягування\n\n"
