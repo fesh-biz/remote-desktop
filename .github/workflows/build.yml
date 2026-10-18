@@ -14,6 +14,28 @@ defaults:
     shell: bash
 
 jobs:
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+      - name: Build and run end-to-end test
+        run: |
+          cd server
+          go build -o ../RemoteDesktop-test.exe .
+          cd ..
+          python tools/e2e_test.py RemoteDesktop-test.exe test-out
+      - name: Publish test results
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete ci-test --yes --cleanup-tag || true
+          gh release create ci-test test-out/* --prerelease --target "$GITHUB_SHA" --title "CI test (Windows)" --notes "Run ${{ github.run_id }}"
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -42,7 +64,7 @@ jobs:
 
       - name: Server (Windows exe)
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq binutils-mingw-w64-x86-64 > /dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq binutils-mingw-w64-x86-64 gcc-mingw-w64-x86-64 > /dev/null
           cd server
           go vet ./... 2>&1 | tee ../logs/server.log
           go test ./... 2>&1 | tee -a ../logs/server.log
