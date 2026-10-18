@@ -28,6 +28,8 @@ sleep 6
 shot 03-connected-help
 t $UI text "Зрозуміло"
 sleep 3
+$UI text "Got it" || true                   # system immersive-mode hint (first time only)
+sleep 2
 shot 04-remote
 
 step gestures
