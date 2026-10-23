@@ -59,7 +59,7 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
     private TextView status;
     private LinearLayout toolbarBox;
     private HorizontalScrollView extraScroll;
-    private TextView fabShow, btnMode, btnMon;
+    private TextView fabShow, btnMode, btnMon, btnZoom;
     private AlertDialog lostDialog;
 
     private final Map<Integer, TextView> stickyButtons = new HashMap<>();
@@ -145,6 +145,14 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
         btnMode = button("", v -> toggleMode());
         updateModeButton();
         main.addView(btnMode);
+        // zoom: 100% → 150% → 200% → 300% → 100%; pinch with two fingers for any level
+        btnZoom = button("🔍 100%", v -> remote.cycleZoom());
+        btnZoom.setOnLongClickListener(v -> {
+            remote.resetZoom();
+            return true;
+        });
+        main.addView(btnZoom);
+        remote.setZoomListener(this::updateZoomButton);
         main.addView(button("Esc", v -> tapKey(Protocol.VK_ESCAPE)));
         main.addView(button("Tab", v -> tapKey(Protocol.VK_TAB)));
         main.addView(stickyButton("Ctrl", Protocol.VK_CONTROL));
@@ -167,11 +175,7 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
         fixed.addView(button("✕", v -> setToolbarVisible(false)));
 
         // extra row
-        extra.addView(button("🔍", v -> {
-            float z = remote.cycleZoom();
-            Toast.makeText(this, z > 1.01f ? "Збільшення " + Math.round(z) + "×" : "Без збільшення", Toast.LENGTH_SHORT).show();
-        }));
-        extra.addView(button("1:1", v -> remote.resetZoom()));
+        extra.addView(button("100%", v -> remote.resetZoom()));
         for (int f = 0; f < 12; f++) {
             final int vk = Protocol.VK_F1 + f;
             extra.addView(button("F" + (f + 1), v -> tapKey(vk)));
@@ -291,6 +295,10 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
     private void setToolbarVisible(boolean visible) {
         toolbarBox.setVisibility(visible ? View.VISIBLE : View.GONE);
         fabShow.setVisibility(visible ? View.GONE : View.VISIBLE);
+    }
+
+    private void updateZoomButton(float z) {
+        if (btnZoom != null) btnZoom.setText("🔍 " + Math.round(z * 10) * 10 + "%");
     }
 
     private void updateModeButton() {
@@ -658,7 +666,9 @@ public class RemoteActivity extends Activity implements RemoteView.InputSink {
                 + "• Подвійний дотик і ведення — перетягування\n"
                 + "• Довге натискання або дотик двома пальцями — права кнопка\n"
                 + "• Два пальці вгору/вниз — прокрутка\n"
-                + "• Розведення двох пальців — збільшення; курсор тоді тримається в центрі екрана\n\n"
+                + "• Швидкий свайп і відпускання — курсор ще трохи їде за інерцією (дотик зупиняє його); якщо затримати палець перед відпусканням — інерції немає\n"
+                + "• Розведення двох пальців — збільшення (до 600%); курсор тоді тримається в центрі екрана\n"
+                + "• Кнопка «🔍» — 100% → 150% → 200% → 300%, довге натискання — назад до 100%\n\n"
                 + "Режим «👆 Дотик»\n"
                 + "• Курсор переходить туди, де ви торкнулися\n"
                 + "• Ведення пальцем — перетягування\n\n"

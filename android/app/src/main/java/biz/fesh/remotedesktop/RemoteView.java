@@ -49,11 +49,27 @@ final class RemoteView extends View {
         void toggleKeyboard();
     }
 
+    /** Told whenever the zoom level changes (toolbar label). */
+    interface ZoomListener {
+        void onZoomChanged(float zoom);
+    }
+
     private static final int DOUBLE_TAP_MS = 250;
     private static final int LONG_PRESS_MS = 500;
     private static final int TWO_UNDECIDED = 0, TWO_SCROLL = 1, TWO_ZOOM = 2;
+    static final float MAX_ZOOM = 6f;
+    private static final float[] ZOOM_STEPS = {1.5f, 2f, 3f};
+
+    // pointer inertia (touchpad): a swipe released while moving keeps the pointer going
+    private static final float FLING_MIN_SPEED = 0.3f;   // dp per ms at release to start
+    private static final float FLING_STOP_SPEED = 0.02f; // dp per ms
+    private static final float FLING_TAU_MS = 130f;      // how quickly it slows down
+    private static final int FLING_REST_MS = 45;         // finger held still this long before lifting: no inertia
+    private static final int VELOCITY_WINDOW_MS = 70;
+    private static final int HIST = 16;
 
     private InputSink sink;
+    private ZoomListener zoomListener;
     private Connection conn;
 
     private Bitmap frame;
@@ -102,6 +118,35 @@ final class RemoteView extends View {
     private float span0, focus0X, focus0Y, lastFocusX, lastFocusY, zoom0, anchorX, anchorY;
     private float scrollAccX, scrollAccY;
 
+    // recent finger positions for the release speed
+    private final long[] histT = new long[HIST];
+    private final float[] histX = new float[HIST], histY = new float[HIST];
+    private int histCount, histPos;
+    private boolean flinging, touchStoppedFling;
+    private float flingVx, flingVy; // dp per ms
+    private long flingLast;
+
+    private final Runnable flingStep = new Runnable() {
+        @Override
+        public void run() {
+            if (!flinging) return;
+            long now = SystemClock.uptimeMillis();
+            float dt = Math.max(1, Math.min(50, now - flingLast));
+            flingLast = now;
+            float decay = (float) Math.exp(-dt / FLING_TAU_MS);
+            float k = FLING_TAU_MS * (1f - decay); // distance covered in dt while slowing down
+            float gain = gainFor((float) Math.hypot(flingVx, flingVy));
+            moveRel(flingVx * k * gain, flingVy * k * gain);
+            flingVx *= decay;
+            flingVy *= decay;
+            if (Math.hypot(flingVx, flingVy) < FLING_STOP_SPEED || sink == null) {
+                flinging = false;
+                return;
+            }
+            postOnAnimation(this);
+        }
+    };
+
     private final Runnable longPress = new Runnable() {
         @Override
         public void run() {
@@ -136,7 +181,20 @@ final class RemoteView extends View {
         arrowStroke.setStrokeJoin(Paint.Join.ROUND);
     }
 
+    void setZoomListener(ZoomListener l) {
+        zoomListener = l;
+    }
+
+    float getZoom() {
+        return zoom;
+    }
+
+    private void zoomChanged() {
+        if (zoomListener != null) zoomListener.onZoomChanged(zoom);
+    }
+
     void setSink(InputSink sink, Connection conn) {
+        stopFling();
         this.sink = sink;
         this.conn = conn;
         pendingAcks = 0;
@@ -247,6 +305,7 @@ final class RemoteView extends View {
     private final float[] tmp2 = new float[2];
 
     void setTouchpad(boolean touchpad) {
+        stopFling();
         this.touchpad = touchpad;
     }
 
@@ -280,12 +339,19 @@ final class RemoteView extends View {
         zoom = 1f;
         layoutValid = false;
         invalidate();
+        zoomChanged();
     }
 
-    /** Toolbar zoom: 1× → 2× → 3× → 1×. In touchpad mode the pointer ends up in the centre. */
+    /** Toolbar zoom: 100% → 150% → 200% → 300% → 100%. In touchpad mode the pointer ends up in the centre. */
     float cycleZoom() {
         if (frame == null) return zoom;
-        float nz = zoom < 1.5f ? 2f : zoom < 2.5f ? 3f : 1f;
+        float nz = 1f;
+        for (float s : ZOOM_STEPS) {
+            if (s > zoom + 0.05f) {
+                nz = s;
+                break;
+            }
+        }
         float s0 = scale();
         float ax = (getWidth() / 2f - panX) / s0, ay = (getHeight() / 2f - panY) / s0;
         zoom = nz;
@@ -296,6 +362,7 @@ final class RemoteView extends View {
         layoutValid = true;
         followCursor();
         invalidate();
+        zoomChanged();
         return zoom;
     }
 
@@ -444,16 +511,23 @@ final class RemoteView extends View {
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN: {
                 requestFocus();
+                // a touch while the pointer is still gliding only stops it, like scrolling lists
+                touchStoppedFling = flinging;
+                stopFling();
                 maxPointers = 1;
                 downTime = e.getEventTime();
                 x0 = lastX = e.getX();
                 y0 = lastY = e.getY();
                 lastMoveTime = downTime;
+                histCount = 0;
+                addSample(downTime, x0, y0);
                 moved = false;
                 longFired = false;
                 fracX = fracY = 0;
                 tapDrag = false;
-                if (touchpad && pendingClick != null) {
+                if (touchStoppedFling) {
+                    // no click, no long press for this touch unless it becomes a move
+                } else if (touchpad && pendingClick != null) {
                     // second touch shortly after a tap: either double click or tap-and-drag
                     cancelPendingClick();
                     tapDrag = true;
@@ -476,13 +550,9 @@ final class RemoteView extends View {
                 }
                 if (e.getPointerCount() == 2) {
                     twoMode = TWO_UNDECIDED;
-                    span0 = Math.max(1f, span(e));
                     focus0X = lastFocusX = focusX(e);
                     focus0Y = lastFocusY = focusY(e);
-                    zoom0 = zoom;
-                    float s = scale();
-                    anchorX = (focus0X - panX) / s;
-                    anchorY = (focus0Y - panY) / s;
+                    startZoomGesture(e);
                     scrollAccX = scrollAccY = 0;
                 }
                 break;
@@ -505,6 +575,7 @@ final class RemoteView extends View {
                         zoom = 1f;
                         clampPan();
                         invalidate();
+                        zoomChanged();
                     }
                 } else if (maxPointers >= 3 && dur < 450) {
                     if (sink != null) sink.toggleKeyboard();
@@ -548,20 +619,12 @@ final class RemoteView extends View {
         if (longFired) return;
         long t = e.getEventTime();
         if (touchpad) {
+            addSample(t, x, y);
             float dx = (x - lastX) / density, dy = (y - lastY) / density; // dp
             float dt = Math.max(1, t - lastMoveTime);
             float speed = (float) Math.hypot(dx, dy) / dt; // dp per ms
-            float gain = sensitivity * (1f + Math.max(0f, Math.min(2.5f, (speed - 0.15f) * 1.6f)));
-            fracX += dx * gain;
-            fracY += dy * gain;
-            int ix = (int) fracX, iy = (int) fracY;
-            if (ix != 0 || iy != 0) {
-                fracX -= ix;
-                fracY -= iy;
-                int seq = nextSeq();
-                send(Protocol.obj("t", "mr", "dx", ix, "dy", iy, "i", seq));
-                trackMove(seq, false, ix, iy);
-            }
+            float gain = gainFor(speed);
+            moveRel(dx * gain, dy * gain);
         } else {
             moveAbs(x, y);
         }
@@ -580,8 +643,10 @@ final class RemoteView extends View {
         }
         if (moved || longFired) {
             tapDrag = false;
+            if (moved && !longFired && touchpad) startFling(e);
             return;
         }
+        if (touchStoppedFling) return; // the touch only stopped the gliding pointer
         if (touchpad) {
             if (tapDrag) {
                 tapDrag = false;
@@ -608,14 +673,96 @@ final class RemoteView extends View {
         }
     }
 
+    // ------------------------------------------------------------ pointer inertia
+
+    private float gainFor(float speed) {
+        return sensitivity * (1f + Math.max(0f, Math.min(2.5f, (speed - 0.15f) * 1.6f)));
+    }
+
+    /** Relative pointer move in PC pixels (fractions are carried over). */
+    private void moveRel(float dx, float dy) {
+        fracX += dx;
+        fracY += dy;
+        int ix = (int) fracX, iy = (int) fracY;
+        if (ix == 0 && iy == 0) return;
+        fracX -= ix;
+        fracY -= iy;
+        int seq = nextSeq();
+        send(Protocol.obj("t", "mr", "dx", ix, "dy", iy, "i", seq));
+        trackMove(seq, false, ix, iy);
+    }
+
+    private void addSample(long t, float x, float y) {
+        histT[histPos] = t;
+        histX[histPos] = x;
+        histY[histPos] = y;
+        histPos = (histPos + 1) % HIST;
+        if (histCount < HIST) histCount++;
+    }
+
+    /**
+     * Finger lifted after a swipe: keep the pointer going if the finger was still moving.
+     * If it rested on the screen before lifting, there is no inertia.
+     */
+    private void startFling(MotionEvent up) {
+        long tUp = up.getEventTime();
+        if (histCount < 2 || tUp - lastMoveTime > FLING_REST_MS) return;
+        // newest sample is the last move; find the oldest one inside the window
+        int newest = (histPos - 1 + HIST) % HIST;
+        int oldest = newest;
+        for (int i = 1; i < histCount; i++) {
+            int j = (newest - i + HIST) % HIST;
+            if (histT[newest] - histT[j] > VELOCITY_WINDOW_MS) break;
+            oldest = j;
+        }
+        long dt = Math.max(tUp, histT[newest]) - histT[oldest];
+        if (oldest == newest || dt < 8) return;
+        float vx = (up.getX() - histX[oldest]) / density / dt;
+        float vy = (up.getY() - histY[oldest]) / density / dt;
+        if (Math.hypot(vx, vy) < FLING_MIN_SPEED) return;
+        flingVx = vx;
+        flingVy = vy;
+        flingLast = SystemClock.uptimeMillis();
+        flinging = true;
+        postOnAnimation(flingStep);
+    }
+
+    private void stopFling() {
+        flinging = false;
+        removeCallbacks(flingStep);
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        stopFling();
+        super.onDetachedFromWindow();
+    }
+
+    // ------------------------------------------------------------ two fingers
+
+    private void startZoomGesture(MotionEvent e) {
+        span0 = Math.max(1f, span(e));
+        zoom0 = zoom;
+        float s = scale();
+        anchorX = (focusX(e) - panX) / s;
+        anchorY = (focusY(e) - panY) / s;
+    }
+
     private void onTwoMove(MotionEvent e) {
         float sp = span(e), fx = focusX(e), fy = focusY(e);
         if (twoMode == TWO_UNDECIDED) {
-            if (Math.abs(sp - span0) > touchSlop * 2f) {
+            float spread = Math.abs(sp - span0);
+            float slide = dist(fx, fy, focus0X, focus0Y);
+            // fingers moving apart/together more than together in one direction = pinch
+            if (spread > touchSlop && spread > slide * 0.7f) {
                 twoMode = TWO_ZOOM;
-            } else if (dist(fx, fy, focus0X, focus0Y) > touchSlop) {
+            } else if (slide > touchSlop * 1.5f) {
                 twoMode = TWO_SCROLL;
             }
+        } else if (twoMode == TWO_SCROLL && (sp > span0 * 1.35f || sp < span0 / 1.35f)) {
+            // a pinch that first looked like a scroll
+            twoMode = TWO_ZOOM;
+            startZoomGesture(e);
         }
         if (twoMode == TWO_SCROLL) {
             float notch = 28 * density;
@@ -629,7 +776,9 @@ final class RemoteView extends View {
                 send(Protocol.obj("t", "wh", "dy", ny * 120, "dx", -nx * 120));
             }
         } else if (twoMode == TWO_ZOOM && frame != null) {
-            zoom = Math.max(1f, Math.min(6f, zoom0 * sp / span0));
+            float before = zoom;
+            zoom = Math.max(1f, Math.min(MAX_ZOOM, zoom0 * sp / span0));
+            if (Math.abs(zoom - before) > 0.005f) zoomChanged();
             float s = scale();
             if (touchpad && pointerFraction(tmp2)) {
                 // touchpad: zoom around the pointer, which stays in the centre

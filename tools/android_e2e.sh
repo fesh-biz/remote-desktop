@@ -47,15 +47,19 @@ adb shell input swipe $CX $CY $CX $CY 900   # long press -> right click
 sleep 1
 
 step zoom follows the pointer
-t $UI text "⋯"
+t $UI text "🔍 100%"                # 150%, pointer centred
 sleep 1
-t $UI text "🔍"                     # 2x, pointer centred
+t $UI text "🔍 150%"                # 200%
 sleep 2
 adb shell input swipe $X1 $CY $X2 $CY 600   # pointer moves, view follows
 sleep 2
 shot 04b-zoom2x
-t $UI text "1:1"
-t $UI text "⋯"
+t $UI text "🔍 200%"                # 300%
+sleep 2
+adb shell input swipe $X1 $CY $X2 $CY 120   # quick flick: pointer glides on
+sleep 2
+shot 04c-zoom3x-fling
+t $UI text "🔍 300%"                # back to 100%
 sleep 1
 
 step keyboard
